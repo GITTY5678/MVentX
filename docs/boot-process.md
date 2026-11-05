@@ -1,6 +1,6 @@
 # MVentX Boot Process Specification
 
-This document details the complete boot lifecycle of a computer booting from an MVentX-prepared USB drive.
+This document details the complete boot lifecycle of a computer booting from an MVentX-prepared USB drive, along with the Milestone 1 prototype implementation.
 
 ---
 
@@ -79,7 +79,7 @@ This document details the complete boot lifecycle of a computer booting from an 
    ```
 4. Only items marked with `"enabled": true` in the configuration schema are rendered. Disabled environments are excluded or hidden.
 
-### Stage 4: Payload Execution
+### Stage 4: Payload Execution (Production Architecture)
 
 Depending on the registered `boot_method`, GRUB executes the appropriate recipe:
 
@@ -104,9 +104,20 @@ Depending on the registered `boot_method`, GRUB executes the appropriate recipe:
 
 ---
 
-## 3. Failure Modes & Fallbacks
+## 3. Milestone 1 Prototype Boot Behavior
 
-- **Missing Data Partition**: If `MVX_DATA` cannot be found by label, GRUB falls back to a rescue menu offering manual partition selection or a diagnostic shell.
-- **Corrupted Menu**: If `mventx_menu.cfg` is missing or unreadable, `grub.cfg` provides a minimal rescue shell entry and attempts to load the backup config `mventx_menu.cfg.bak`.
-- **Invalid ISO Path**: If an ISO registered in the menu does not exist on disk, GRUB displays a descriptive notification instead of crashing.
+In Milestone 1, the prototype establishes and verifies the core bootloader control flow without executing live operating system kernels:
 
+1. **Host-Side Generation**: The Python generator (`core/boot_config/generator.py`) reads `mventx.json` and outputs `mventx_menu.cfg`.
+2. **GRUB Boot Verification**: Upon boot, GRUB loads `grub.cfg`, sets MVentX color schemes, and loads `mventx_menu.cfg`.
+3. **Environment Verification Entry**: Selecting an environment displays its verified registration metadata (display name, unique ID, boot method, ISO path, custom arguments).
+4. **Fallback Handling**: If `mventx.json` is empty or all environments are disabled, a clean fallback menu entry is rendered explaining that no environments are currently enabled.
+5. **Recovery Mode**: If `mventx_menu.cfg` is missing entirely, `grub.cfg` provides an informative unconfigured recovery entry.
+
+---
+
+## 4. Failure Modes & Fallbacks
+
+- **Missing Data Partition**: If `MVX_DATA` cannot be found by label, GRUB falls back to searching on `$root` or prompts the user.
+- **Missing or Corrupted Menu**: If `mventx_menu.cfg` is missing, `grub.cfg` renders a fallback "MVentX Recovery / Unconfigured Mode" entry.
+- **Empty Registry**: If no environments are enabled, the generator renders a fallback "No environments registered or enabled" entry with clear next steps.

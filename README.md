@@ -26,7 +26,7 @@ It allows users to initialize a USB drive once and subsequently manage bootable 
 - **Filesystem Layout**:
   - Partition 1 (`MVX_BOOT`): FAT32 for EFI bootloader, GRUB binaries, and generated configuration.
   - Partition 2 (`MVX_DATA`): exFAT (or NTFS/ext4) for user ISO storage and environment payload storage.
-- **Testing & Verification**: QEMU / KVM virtualized boot testing
+- **Testing & Verification**: QEMU virtualized UEFI boot testing on both Windows and Linux
 
 ---
 
@@ -42,43 +42,82 @@ MVentX/
 ├── boot_methods/     # Modular boot strategies (Linux loopback, Windows, chainloading)
 ├── tests/            # Unit, integration, and QEMU-based boot test suites
 ├── scripts/          # Developer tooling and build scripts
+│   ├── windows/      # Native Windows 11 PowerShell automation & FAT builder
+│   │   ├── create_test_disk.ps1
+│   │   ├── run_qemu.ps1
+│   │   └── make_fat_disk.py
+│   ├── create_test_disk.sh
+│   ├── run_qemu.sh
+│   └── generate_test_menu.py
 └── resources/        # Icons, logos, and UI/GRUB themes
 ```
 
 ---
 
-## Getting Started
+## Development & Testing Workflow
 
-### Prerequisites
+### Native Windows 11 Setup
 
-- Python 3.10 or higher
-- `pip` or modern package manager (e.g. `uv`, `poetry`)
-- GRUB 2 utilities (`grub-install`, `grub-mkimage` for Linux/WSL environments)
-- QEMU (`qemu-system-x86_64`) for virtual boot testing
+MVentX development and Milestone 1 virtual boot testing run natively on Windows 11 without requiring WSL2, Cygwin, MSYS2, or Administrator privileges.
 
-### Installation & Development Setup
+#### 1. Prerequisites (Windows)
+- **Python 3.10+**: Install via winget or python.org:
+  ```powershell
+  winget install Python.Python.3.12
+  ```
+- **QEMU**:
+  ```powershell
+  winget install SoftwareFreedomConservancy.QEMU
+  ```
+- **OVMF UEFI Firmware**:
+  Included with QEMU Windows distributions (e.g. `C:\Program Files\qemu\share\edk2-x86_64-code.fd`) or downloadable from [rust-osdev/ovmf-prebuilt](https://github.com/rust-osdev/ovmf-prebuilt/releases) to `build\ovmf\OVMF.fd`.
+- **GRUB EFI Binary (`BOOTX64.EFI`)**:
+  - Option A: Run `create_test_disk.ps1 -DownloadGrub` to download official GNU GRUB for Windows and compile `BOOTX64.EFI` automatically.
+  - Option B: Place any pre-compiled 64-bit GRUB EFI binary into `boot\efi\BOOTX64.EFI`.
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/mventx/mventx.git
-   cd mventx
-   ```
+#### 2. Running Python Tests on Windows
+```powershell
+# Run unit and integration tests
+python -m unittest discover tests
+```
 
-2. Run the development environment setup script:
-   ```bash
-   # On Linux/macOS/WSL:
-   bash scripts/setup_dev.sh
+#### 3. Building the Virtual Disk (Native Windows)
+```powershell
+# Create virtual disk with sample registered environments:
+powershell -ExecutionPolicy Bypass -File scripts\windows\create_test_disk.ps1
 
-   # Or manually with Python venv:
-   python -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-   pip install -e ".[dev]"
-   ```
+# Or test the empty fallback menu behavior:
+powershell -ExecutionPolicy Bypass -File scripts\windows\create_test_disk.ps1 -Empty
+```
 
-3. Run test suite:
-   ```bash
-   pytest
-   ```
+#### 4. Running QEMU UEFI Boot (Native Windows)
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\run_qemu.ps1
+```
+
+---
+
+### Linux (Ubuntu 24.04 LTS / Debian) Setup
+
+#### 1. Prerequisites (Linux)
+```bash
+sudo apt update
+sudo apt install -y qemu-system-x86 ovmf grub-efi-amd64-bin mtools dosfstools parted python3
+```
+
+#### 2. Running Python Tests on Linux
+```bash
+python3 -m unittest discover tests
+```
+
+#### 3. Building the Virtual Disk & Running QEMU (Linux)
+```bash
+# Build virtual disk
+bash scripts/create_test_disk.sh
+
+# Run QEMU UEFI virtual machine
+bash scripts/run_qemu.sh
+```
 
 ---
 
@@ -90,10 +129,10 @@ MVentX/
 - [Configuration Schema & Reference](docs/configuration.md)
 - [Development Roadmap](docs/development-roadmap.md)
 - [Technical Decisions & Rationale](docs/technical-decisions.md)
+- [QEMU Virtual Boot Testing Guide](tests/boot/README.md)
 
 ---
 
 ## License
 
-This project is licensed under the [GNU General Public License v3.0](LICENSE) (or see individual component licenses for GRUB-compatible licensing considerations).
-
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
