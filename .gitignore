@@ -1,0 +1,75 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions & binaries
+*.so
+*.dylib
+*.dll
+*.o
+*.obj
+*.a
+*.lib
+
+# Distribution / packaging
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# PySide / Qt generated files
+*.pyc
+ui_*.py
+rc_*.py
+*_rc.py
+.qmake.stash
+
+# Testing & Coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+
+# Type checking & Linters
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+
+# IDEs and Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# GRUB & Bootloader build artifacts / temp images
+*.iso
+*.img
+*.qcow2
+*.vmdk
+*.raw
+boot/grub/boot.img
+boot/grub/core.img
+boot/efi/*.efi.tmp
+
+# Local scratch and logs
+logs/
+*.log
+scratch/
+

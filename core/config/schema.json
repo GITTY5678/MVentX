@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "MVentXConfiguration",
+  "description": "Validation schema for MVentX multi-environment configuration store (mventx.json)",
+  "type": "object",
+  "required": ["version", "meta", "environments"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Semantic version of the configuration schema",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "meta": {
+      "type": "object",
+      "description": "Global metadata and visual preferences for MVentX",
+      "required": ["title", "timeout"],
+      "additionalProperties": false,
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Title rendered at the top of the boot menu",
+          "default": "MVentX Multiboot System"
+        },
+        "theme": {
+          "type": "string",
+          "description": "Name of the GRUB theme to activate",
+          "default": "mventx"
+        },
+        "timeout": {
+          "type": "integer",
+          "description": "Boot menu countdown timeout in seconds",
+          "minimum": 0,
+          "maximum": 300,
+          "default": 10
+        },
+        "default_entry_id": {
+          "type": ["string", "null"],
+          "description": "Unique ID of the environment selected by default",
+          "default": null
+        }
+      }
+    },
+    "environments": {
+      "type": "array",
+      "description": "Ordered list of registered boot environments",
+      "items": {
+        "$ref": "#/definitions/Environment"
+      }
+    }
+  },
+  "definitions": {
+    "Environment": {
+      "type": "object",
+      "required": [
+        "id",
+        "display_name",
+        "type",
+        "boot_method",
+        "enabled",
+        "order"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique alphanumeric identifier for the environment",
+          "pattern": "^[a-zA-Z0-9_-]+$"
+        },
+        "display_name": {
+          "type": "string",
+          "description": "Human-readable name displayed in the boot menu",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "type": {
+          "type": "string",
+          "description": "Classification of the bootable environment",
+          "enum": ["iso", "chainload"]
+        },
+        "iso_path": {
+          "type": ["string", "null"],
+          "description": "Relative path to the ISO file on the data partition (required if type is iso)"
+        },
+        "boot_method": {
+          "type": "string",
+          "description": "Identifier matching a registered boot recipe (e.g. linux_generic_loopback, chainload_efi)",
+          "minLength": 1
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether this environment appears in the active boot menu"
+        },
+        "order": {
+          "type": "integer",
+          "description": "1-based index determining display order in the boot menu",
+          "minimum": 1
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional details or release notes about the environment"
+        },
+        "custom_args": {
+          "type": "string",
+          "description": "Optional custom kernel or bootloader arguments"
+        },
+        "target_path": {
+          "type": ["string", "null"],
+          "description": "Target EFI or bootloader path if type is chainload"
+        },
+        "target_hint": {
+          "type": ["string", "null"],
+          "description": "Device hint for chainloading (e.g., hd0,gpt1)"
+        },
+        "checksum": {
+          "type": ["object", "null"],
+          "description": "Optional cryptographic hash for ISO validation",
+          "properties": {
+            "algorithm": {
+              "type": "string",
+              "enum": ["sha256", "sha512", "md5"]
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": ["algorithm", "value"],
+          "additionalProperties": false
+        }
+      },
+      "dependencies": {
+        "iso_path": {
+          "oneOf": [
+            {
+              "properties": {
+                "type": { "const": "iso" },
+                "iso_path": { "type": "string", "minLength": 1 }
+              }
+            },
+            {
+              "properties": {
+                "type": { "const": "chainload" },
+                "iso_path": { "type": "null" }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
+

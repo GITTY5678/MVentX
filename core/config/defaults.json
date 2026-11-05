@@ -1,0 +1,11 @@
+{
+  "version": "1.0.0",
+  "meta": {
+    "title": "MVentX Multiboot System",
+    "theme": "mventx",
+    "timeout": 10,
+    "default_entry_id": null
+  },
+  "environments": []
+}
+
