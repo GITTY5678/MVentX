@@ -13,6 +13,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from core.boot_config.recipes import (
+    detect_recipe_from_hints,
+    generate_loopback_boot_commands,
+    get_recipe,
+)
+
 
 class ConfigValidationError(Exception):
     """Raised when the configuration data fails structural or semantic validation."""
@@ -32,14 +38,8 @@ _DANGEROUS_CHARS_REGEX = re.compile(r"[\r\n\x00-\x1f;{}`]")
 _SHELL_EXPANSION_REGEX = re.compile(r"\$\(.*\)|`.*`|\$\{.*\}")
 
 
-def sanitize_display_name(raw_name: str) -> str:
-    """Validate and safely escape a user-defined display name for GRUB menu entries.
-
-    Raises:
-        ConfigSecurityError: If display name contains forbidden control characters,
-                             braces, semicolons, or execution syntax.
-        ConfigValidationError: If display name is empty or too long.
-    """
+def validate_display_name(raw_name: str) -> str:
+    """Validate that display name meets length and security requirements without escaping."""
     if not isinstance(raw_name, str):
         raise ConfigValidationError(f"display_name must be a string, got {type(raw_name).__name__}")
 
@@ -61,9 +61,20 @@ def sanitize_display_name(raw_name: str) -> str:
             f"display_name contains forbidden command substitution patterns: {stripped!r}"
         )
 
-    # Escape quotes and standalone dollar signs for GRUB string literal
-    escaped = stripped.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
-    return escaped
+    return stripped
+
+
+def sanitize_display_name(raw_name: str) -> str:
+    """Validate and safely escape a user-defined display name for GRUB menu entries.
+
+    Raises:
+        ConfigSecurityError: If display name contains forbidden control characters,
+                             braces, semicolons, or execution syntax.
+        ConfigValidationError: If display name is empty or too long.
+    """
+    validated = validate_display_name(raw_name)
+    # Escape quotes, backslashes, and standalone dollar signs for GRUB string literal
+    return validated.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
 
 
 def sanitize_id(raw_id: str) -> str:
@@ -123,11 +134,26 @@ def sanitize_custom_args(raw_args: Optional[str]) -> Optional[str]:
     return stripped.replace('"', '\\"')
 
 
+# Recognized standard boot methods
+KNOWN_BOOT_METHODS = {
+    "linux_generic_loopback",
+    "linux_casper",
+    "linux_archiso",
+    "linux_dracut",
+    "linux_live_boot",
+    "chainload_efi",
+    "windows_wimboot",
+    "iso_loopback",
+    "generic_uefi",
+}
+
+
 class GrubMenuGenerator:
     """Renders GRUB 2 menuentry blocks based on registered MVentX environments."""
 
-    def __init__(self, templates_dir: Optional[Path] = None) -> None:
+    def __init__(self, templates_dir: Optional[Path] = None, data_dir: Optional[Path] = None) -> None:
         self.templates_dir = templates_dir
+        self.data_dir = Path(data_dir).resolve() if data_dir else None
 
     def validate_config(self, config_data: Dict[str, Any]) -> None:
         """Validate top-level and environment-level configuration fields."""
@@ -285,9 +311,16 @@ class GrubMenuGenerator:
             lines.append(f'    echo "  Type:        {env_type}"')
             lines.append(f'    echo "  Boot Method: {boot_method}"')
 
+            if boot_method not in KNOWN_BOOT_METHODS:
+                lines.append(f'    echo "  [WARNING] Unrecognized boot method: {boot_method}"')
+
             if env_type == "iso":
                 iso_path = sanitize_path(entry.get("iso_path"))
                 lines.append(f'    echo "  ISO Path:    {iso_path}"')
+                if self.data_dir and iso_path:
+                    full_iso = self.data_dir / iso_path
+                    if not full_iso.is_file():
+                        lines.append(f'    echo "  [WARNING] Registered ISO file missing from storage: {iso_path}"')
             elif env_type == "chainload":
                 target_path = sanitize_path(entry.get("target_path"))
                 if target_path:
@@ -297,12 +330,49 @@ class GrubMenuGenerator:
                 custom_args = sanitize_custom_args(entry.get("custom_args"))
                 lines.append(f'    echo "  Arguments:   {custom_args}"')
 
+            lines.append('    echo "  Note: Registration does not imply verified kernel bootability."')
+            lines.append('    echo "=========================================================="')
+
+            if env_type == "iso":
+                recipe_key = entry.get("recipe") or boot_method
+                recipe = get_recipe(recipe_key)
+                k_override = sanitize_path(entry.get("kernel_path"))
+                i_override = sanitize_path(entry.get("initrd_path"))
+                c_args = sanitize_custom_args(entry.get("custom_args"))
+                iso_clean = sanitize_path(entry.get("iso_path"))
+                if iso_clean:
+                    boot_cmds = generate_loopback_boot_commands(
+                        recipe=recipe,
+                        iso_path=iso_clean,
+                        kernel_path_override=k_override,
+                        initrd_path_override=i_override,
+                        custom_args=c_args,
+                    )
+                    lines.extend(boot_cmds)
+                else:
+                    lines.extend([
+                        '    echo "Error: Missing ISO path for environment."',
+                        '    sleep 5',
+                    ])
+            elif env_type == "chainload":
+                target_path = sanitize_path(entry.get("target_path"))
+                if target_path:
+                    lines.extend([
+                        f'    chainloader "{target_path}"',
+                        '    boot',
+                    ])
+                else:
+                    lines.extend([
+                        '    echo "Error: Missing target path for chainloading."',
+                        '    sleep 5',
+                    ])
+            else:
+                lines.extend([
+                    '    echo "Unsupported environment type."',
+                    '    sleep 5',
+                ])
+
             lines.extend([
-                '    echo "=========================================================="',
-                '    echo "  [MVentX Milestone 1 Prototype: Boot entry verified]"',
-                '    echo ""',
-                '    echo "  Press Enter or ESC to return to menu."',
-                "    sleep 5",
                 "}",
                 "",
             ])

@@ -1,28 +1,87 @@
-"""Partition Management Layer.
+"""Partition Management Layer for MVentX.
 
-Provides disk partitioning and filesystem creation routines:
-- Partition 1: FAT32 (MVX_BOOT), EFI System Partition flag.
-- Partition 2: exFAT (MVX_DATA), storage payload partition.
+Implements partition creation and formatting for virtual disk images and
+physical storage devices with strict safety boundaries.
 """
 
-from typing import Dict, Tuple
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import tempfile
+from typing import Dict, Optional, Tuple
+
+from core.storage.device_info import DeviceInfo
+from installer.partition_planner import PartitionPlan, PartitionPlanner
+from scripts.windows.make_dual_partition_disk import build_dual_partition_gpt_disk
+
+
+class PartitionManagerError(Exception):
+    """Raised when partitioning or formatting fails."""
 
 
 class PartitionManager:
-    """Manages low-level disk formatting and partition alignment."""
+    """Manages disk partitioning and filesystem formatting."""
 
-    def __init__(self, device_path: str) -> None:
-        self.device_path = device_path
+    def __init__(self, allow_physical_formatting: bool = False) -> None:
+        self.allow_physical_formatting = allow_physical_formatting
 
-    def verify_safety(self) -> bool:
-        """Ensure device is not a primary OS drive or mounted system volume."""
-        raise NotImplementedError("Implementation reserved for Phase 4.")
+    def create_and_format_virtual_disk(
+        self,
+        output_image_path: Path | str,
+        esp_staging_dir: Path | str,
+        data_staging_dir: Path | str,
+        disk_size_mb: int = 256,
+        esp_size_mb: int = 64,
+    ) -> Path:
+        """Create a complete dual-partition GPT virtual disk image from staged directories.
 
-    def create_partitions(self, table_format: str = "gpt") -> Tuple[str, str]:
-        """Create dual partition layout (MVX_BOOT, MVX_DATA)."""
-        raise NotImplementedError("Implementation reserved for Phase 4.")
+        Parameters:
+            output_image_path: Destination path for the raw disk image (.img).
+            esp_staging_dir: Directory containing staged EFI bootloader files.
+            data_staging_dir: Directory containing staged MVX_DATA files and configuration.
+            disk_size_mb: Total raw disk size in Megabytes.
+            esp_size_mb: Size of the MVX_BOOT FAT32 EFI partition in Megabytes.
+        """
+        out_p = Path(output_image_path).resolve()
+        esp_p = Path(esp_staging_dir).resolve()
+        data_p = Path(data_staging_dir).resolve()
 
-    def format_partitions(self, boot_partition: str, data_partition: str) -> None:
-        """Format boot partition as FAT32 and data partition as exFAT."""
-        raise NotImplementedError("Implementation reserved for Phase 4.")
+        # Validate partition plan before writing
+        plan = PartitionPlanner.calculate_plan(
+            disk_size_bytes=disk_size_mb * 1024 * 1024,
+            esp_size_mb=esp_size_mb,
+        )
 
+        try:
+            build_dual_partition_gpt_disk(
+                esp_source_dir=esp_p,
+                output_path=out_p,
+                disk_size_mb=disk_size_mb,
+                esp_size_mb=esp_size_mb,
+                data_source_dir=data_p,
+            )
+        except Exception as exc:
+            raise PartitionManagerError(f"Failed constructing virtual disk image: {exc}") from exc
+
+        return out_p
+
+    def format_physical_device(
+        self,
+        device: DeviceInfo,
+        esp_size_mb: int = 64,
+        confirmed: bool = False,
+    ) -> Tuple[str, str]:
+        """Format a physical storage device.
+
+        CRITICAL SAFETY CONTROL:
+        Physical formatting is strictly blocked unless allow_physical_formatting is True
+        AND confirmed is True.
+        """
+        if not self.allow_physical_formatting or not confirmed:
+            raise PermissionError(
+                "CRITICAL SAFETY SHIELD: Physical storage device formatting is disabled by policy. "
+                "Virtual disk target mode must be used for testing and validation."
+            )
+
+        raise NotImplementedError("Physical device formatting will be enabled in future releases after validation.")

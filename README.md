@@ -23,10 +23,10 @@ It allows users to initialize a USB drive once and subsequently manage bootable 
 - **Management Suite**: Python 3.10+
 - **Desktop UI**: PySide6 (Qt 6)
 - **Configuration & Metadata**: JSON with JSON Schema validation
-- **Filesystem Layout**:
-  - Partition 1 (`MVX_BOOT`): FAT32 for EFI bootloader, GRUB binaries, and generated configuration.
-  - Partition 2 (`MVX_DATA`): exFAT (or NTFS/ext4) for user ISO storage and environment payload storage.
-- **Testing & Verification**: QEMU virtualized UEFI boot testing on both Windows and Linux
+- **Filesystem Layout (Dual-Partition GPT)**:
+  - Partition 1 (`MVX_BOOT`): FAT32 EFI System Partition (ESP) for UEFI bootloader (`BOOTX64.EFI`), GRUB binaries, fonts, and synchronized `mventx_menu.cfg`.
+  - Partition 2 (`MVX_DATA`): exFAT Microsoft Basic Data Partition for user ISO storage (`ISO/`), authoritative environment configuration (`config/mventx.json`), metadata (`metadata/`), and atomic backups (`backups/`).
+- **Testing & Verification**: QEMU virtualized UEFI boot testing on both Windows and Linux using pure-Python rootless disk creation.
 
 ---
 
@@ -35,19 +35,39 @@ It allows users to initialize a USB drive once and subsequently manage bootable 
 ```
 MVentX/
 ├── docs/             # Technical specifications, architecture, and guides
+│   ├── architecture.md
+│   ├── boot-process.md
+│   ├── configuration.md
+│   ├── development-roadmap.md
+│   ├── installation.md
+│   └── technical-decisions.md
 ├── boot/             # GRUB 2 bootloader configs, EFI structures, and boot assets
-├── core/             # Core Python business logic (ISO manager, storage, config)
+│   ├── efi/          # BOOTX64.EFI bootloader binary
+│   └── grub/         # grub.cfg, fonts, and generated menu scripts
+├── core/             # Core Python business logic
+│   ├── boot_config/  # Native GRUB configuration generator & escaping
+│   ├── config/       # Schema validation, default settings, and loaders
+│   ├── iso_manager/  # ISO metadata extraction and validation
+│   └── storage/      # Dual-partition manager, Win32 drive detection, disk validator
 ├── manager/          # PySide6 desktop GUI and management service layer
 ├── installer/        # USB provisioning, partition manager, and bootloader installer
 ├── boot_methods/     # Modular boot strategies (Linux loopback, Windows, chainloading)
 ├── tests/            # Unit, integration, and QEMU-based boot test suites
+│   ├── unit/         # Unit tests (config, generator, storage manager, validator)
+│   ├── integration/  # End-to-end integration tests
+│   └── boot/         # QEMU UEFI boot testing guides and scripts
 ├── scripts/          # Developer tooling and build scripts
-│   ├── windows/      # Native Windows 11 PowerShell automation & FAT builder
+│   ├── windows/      # Native Windows 11 PowerShell automation & disk builders
 │   │   ├── create_test_disk.ps1
 │   │   ├── run_qemu.ps1
+│   │   ├── test_windows_mount.ps1
+│   │   ├── convert_to_vhd.py
+│   │   ├── make_dual_partition_disk.py
 │   │   └── make_fat_disk.py
 │   ├── create_test_disk.sh
 │   ├── run_qemu.sh
+│   ├── test_qemu_harness.py # QEMU automated boot harness and screendump verifier
+│   ├── manage_iso.py        # ISO environment registration & management CLI
 │   └── generate_test_menu.py
 └── resources/        # Icons, logos, and UI/GRUB themes
 ```
@@ -95,6 +115,66 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\create_test_disk.ps1 -E
 powershell -ExecutionPolicy Bypass -File scripts\windows\run_qemu.ps1
 ```
 
+#### 5. Managing ISO Environments (CLI)
+```powershell
+# Validate an ISO file structure and filesystem signatures:
+python scripts\manage_iso.py validate C:\path\to\ubuntu.iso
+
+# View partition storage metrics and registered environment status:
+python scripts\manage_iso.py --data build\data status
+
+# List all registered environments in display sequence:
+python scripts\manage_iso.py --data build\data list
+
+# Manually register an ISO file (never auto-registered):
+python scripts\manage_iso.py --data build\data --boot build\esp register ubuntu-24.04-desktop-amd64.iso --name "Ubuntu 24.04 LTS"
+
+# Rename an environment:
+python scripts\manage_iso.py --data build\data --boot build\esp rename ubuntu_24_04 "Ubuntu 24.04 LTS Noble"
+
+# Enable / Disable an environment:
+python scripts\manage_iso.py --data build\data --boot build\esp disable ubuntu_24_04
+python scripts\manage_iso.py --data build\data --boot build\esp enable ubuntu_24_04
+
+# Remove registration (preserves ISO file by default):
+python scripts\manage_iso.py --data build\data --boot build\esp remove ubuntu_24_04
+```
+
+#### 6. Launching the PySide6 Desktop Application
+```powershell
+# Launch targeting detected physical USB drives (or automatically fallback to virtual staging):
+python manager\main.py
+
+# Or launch explicitly targeting virtual test directories:
+python manager\main.py --data build\data --boot build\esp
+
+#### 7. Storage Validation & Windows Interoperability
+```powershell
+# Run the complete automated test suite (153 tests):
+python -m unittest discover tests
+
+# Deep sector-level structural validation of GPT, FAT32, and exFAT:
+python -m core.storage.disk_validator build\mventx_test.img
+
+# Direct sector read of configuration out of raw exFAT clusters:
+python -m core.storage.disk_validator build\mventx_test.img --read-exfat config/mventx.json
+
+# Test Windows VHD/VHDX conversion and loopback mount lifecycle:
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\test_windows_mount.ps1
+```
+
+#### 8. Automated QEMU Boot Verification Harness (Milestones 6 & 7)
+```powershell
+# Run automated virtual UEFI boot harness across all scenarios and verify GRUB graphics:
+python scripts/test_qemu_harness.py --scenario all
+
+# Run real Linux ISO loopback boot verification in QEMU (Levels 1-4):
+python -m unittest tests/integration/test_linux_loopback_boot.py
+
+# Interactive windowed UEFI virtual boot:
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\run_qemu.ps1
+```
+
 ---
 
 ### Linux (Ubuntu 24.04 LTS / Debian) Setup
@@ -128,6 +208,11 @@ bash scripts/run_qemu.sh
 - [Installation Guide](docs/installation.md)
 - [Configuration Schema & Reference](docs/configuration.md)
 - [Development Roadmap](docs/development-roadmap.md)
+- [Milestone 5: Storage Validation Report](docs/milestone-5-storage-validation.md)
+- [Milestone 6: End-to-End Integration Report](docs/milestone-6-end-to-end-integration.md)
+- [Milestone 7: Linux ISO Loopback Boot Report](docs/milestone-7-linux-boot.md)
+- [Milestone 8: Linux Compatibility Report](docs/milestone-8-linux-compatibility.md)
+- [Milestone 9: USB Installation and Preparation Report](docs/milestone-9-usb-installation.md)
 - [Technical Decisions & Rationale](docs/technical-decisions.md)
 - [QEMU Virtual Boot Testing Guide](tests/boot/README.md)
 

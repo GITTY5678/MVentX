@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    MVentX Native Windows Virtual Disk Builder for UEFI + GRUB Testing (Milestone 1).
+    MVentX Native Windows Dual-Partition Virtual Disk Builder (Milestone 2).
 
 .DESCRIPTION
-    Prepares an EFI System Partition (ESP) directory structure and constructs
-    a bootable UEFI GPT raw disk image on Windows without requiring WSL2, Linux,
-    or Administrator privileges.
+    Constructs a bootable UEFI GPT raw disk image with two distinct partitions:
+      - Partition 1: MVX_BOOT (FAT32 EFI System Partition)
+      - Partition 2: MVX_DATA (exFAT User Data Partition)
+    without requiring WSL2, Linux, or Administrator privileges.
 
 .PARAMETER Empty
     Generate an empty environment configuration to verify the fallback menu.
@@ -16,8 +17,14 @@
 .PARAMETER EspDir
     Path to the staged EFI filesystem directory. Default is 'build\esp'.
 
+.PARAMETER DataDir
+    Path to the staged data partition directory. Default is 'build\data'.
+
 .PARAMETER DiskSizeMB
-    Virtual disk size in megabytes. Default is 64.
+    Virtual disk size in megabytes. Default is 256.
+
+.PARAMETER EspSizeMB
+    ESP partition size in megabytes. Default is 64.
 
 .PARAMETER DownloadGrub
     Attempt to download official GNU GRUB for Windows to compile BOOTX64.EFI natively.
@@ -31,7 +38,9 @@ param(
     [switch]$Empty,
     [string]$DiskPath = "build\mventx_test.img",
     [string]$EspDir = "build\esp",
-    [int]$DiskSizeMB = 64,
+    [string]$DataDir = "build\data",
+    [int]$DiskSizeMB = 256,
+    [int]$EspSizeMB = 64,
     [switch]$DownloadGrub,
     [switch]$UseDiskpart
 )
@@ -42,7 +51,9 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = (Resolve-Path "$ScriptDir\..\..").Path
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " MVentX Native Windows: Virtual Disk Preparation          " -ForegroundColor Cyan
+Write-Host " MVentX Native Windows: Dual-Partition Disk Preparation    " -ForegroundColor Cyan
+Write-Host "   Partition 1: MVX_BOOT (FAT32, $EspSizeMB MB)            " -ForegroundColor Cyan
+Write-Host "   Partition 2: MVX_DATA (exFAT, $($DiskSizeMB - $EspSizeMB) MB)           " -ForegroundColor Cyan
 Write-Host "==========================================================" -ForegroundColor Cyan
 
 # ------------------------------------------------------------------------------
@@ -60,42 +71,66 @@ or download from https://www.python.org/downloads/windows/
 Write-Host "[*] Python 3 detected: $($PythonCmd.Source)" -ForegroundColor Green
 
 # ------------------------------------------------------------------------------
-# 2. Setup Staging Directories
+# 2. Setup Staging Directories for Both Partitions
 # ------------------------------------------------------------------------------
 $ResolvedEspDir = Join-Path $RepoRoot $EspDir
+$ResolvedDataDir = Join-Path $RepoRoot $DataDir
 $ResolvedDiskPath = Join-Path $RepoRoot $DiskPath
 $BuildDir = Split-Path -Parent $ResolvedDiskPath
 
 New-Item -ItemType Directory -Path $BuildDir -Force | Out-Null
+
+# Staging MVX_BOOT (ESP)
 New-Item -ItemType Directory -Path "$ResolvedEspDir\EFI\BOOT" -Force | Out-Null
 New-Item -ItemType Directory -Path "$ResolvedEspDir\boot\grub\fonts" -Force | Out-Null
 
+# Staging MVX_DATA (User Data)
+New-Item -ItemType Directory -Path "$ResolvedDataDir\ISO" -Force | Out-Null
+New-Item -ItemType Directory -Path "$ResolvedDataDir\config" -Force | Out-Null
+New-Item -ItemType Directory -Path "$ResolvedDataDir\metadata" -Force | Out-Null
+New-Item -ItemType Directory -Path "$ResolvedDataDir\backups" -Force | Out-Null
+
 # ------------------------------------------------------------------------------
-# 3. Generate Dynamic MVentX Menu Configuration
+# 3. Setup Authoritative Configuration on MVX_DATA and Sync to MVX_BOOT
 # ------------------------------------------------------------------------------
-Write-Host "[*] Compiling mventx_menu.cfg via Python configuration generator..." -ForegroundColor Yellow
+$DataConfigPath = "$ResolvedDataDir\config\mventx.json"
 $MenuOutput = "$ResolvedEspDir\boot\grub\mventx_menu.cfg"
+
+Write-Host "[*] Initializing authoritative mventx.json on MVX_DATA..." -ForegroundColor Yellow
 $GenerateArgs = @("$RepoRoot\scripts\generate_test_menu.py", "--output", $MenuOutput)
 if ($Empty) {
     $GenerateArgs += "--empty"
     Write-Host "[*] Mode: Empty fallback configuration" -ForegroundColor Yellow
+    # Write empty config to MVX_DATA
+    $EmptyConfig = @{
+        version = "1.0.0"
+        meta = @{ title = "MVentX Multiboot System (Empty Configuration)"; timeout = 10 }
+        environments = @()
+    } | ConvertTo-Json -Depth 5
+    Set-Content -Path $DataConfigPath -Value $EmptyConfig -Encoding UTF8
 } else {
     Write-Host "[*] Mode: Sample registered environments" -ForegroundColor Yellow
+    # Copy project sample/default config to MVX_DATA
+    $DefaultsJson = "$RepoRoot\core\config\defaults.json"
+    if (Test-Path $DefaultsJson) {
+        Copy-Item -Path $DefaultsJson -Destination $DataConfigPath -Force
+    }
 }
 
+# Compile dynamic menu to MVX_BOOT
 & python @GenerateArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Failed to generate dynamic menu configuration."
 }
 
 # ------------------------------------------------------------------------------
-# 4. Copy Primary GRUB Configuration
+# 4. Copy Primary GRUB Configuration to MVX_BOOT
 # ------------------------------------------------------------------------------
 $GrubCfgSource = "$RepoRoot\boot\grub\grub.cfg"
 $GrubCfgTarget = "$ResolvedEspDir\boot\grub\grub.cfg"
 if (Test-Path $GrubCfgSource) {
     Copy-Item -Path $GrubCfgSource -Destination $GrubCfgTarget -Force
-    Write-Host "[*] Deployed primary grub.cfg to ESP staging" -ForegroundColor Green
+    Write-Host "[*] Deployed primary grub.cfg to MVX_BOOT staging" -ForegroundColor Green
 } else {
     Write-Error "Could not find primary grub.cfg at $GrubCfgSource"
 }
@@ -106,7 +141,6 @@ if (Test-Path $GrubCfgSource) {
 $TargetBootEfi = "$ResolvedEspDir\EFI\BOOT\BOOTX64.EFI"
 $FoundBootEfi = $null
 
-# Search in build/ and boot/efi/
 $CandidatePaths = @(
     "$BuildDir\BOOTX64.EFI",
     "$RepoRoot\boot\efi\BOOTX64.EFI"
@@ -168,6 +202,23 @@ foreach ($fc in $FontCandidates) {
     }
 }
 
+# Deploy dynamic GRUB modules (loopback, linux, iso9660, etc.)
+$ModuleCandidates = @(
+    "$RepoRoot\boot\grub\x86_64-efi",
+    "$BuildDir\grub-windows\grub-2.12-for-windows\x86_64-efi"
+)
+foreach ($mc in $ModuleCandidates) {
+    if (Test-Path $mc) {
+        $EspModuleDir = "$ResolvedEspDir\boot\grub\x86_64-efi"
+        if (-not (Test-Path $EspModuleDir)) {
+            New-Item -ItemType Directory -Path $EspModuleDir -Force | Out-Null
+        }
+        Copy-Item -Path "$mc\*" -Destination $EspModuleDir -Force
+        Write-Host "[*] Deployed GRUB x86_64-efi runtime modules from $mc" -ForegroundColor Green
+        break
+    }
+}
+
 if ($FoundBootEfi) {
     Copy-Item -Path $FoundBootEfi -Destination $TargetBootEfi -Force
     Write-Host "[*] Deployed BOOTX64.EFI from $FoundBootEfi" -ForegroundColor Green
@@ -219,7 +270,6 @@ if ($FoundBootEfi) {
     Write-Host "              boot\efi\BOOTX64.EFI" -ForegroundColor White
     Write-Host ""
     
-    # Create diagnostic placeholder stub if completely absent so staging can proceed
     if (-not (Test-Path $TargetBootEfi)) {
         [System.IO.File]::WriteAllBytes($TargetBootEfi, [System.Text.Encoding]::ASCII.GetBytes("MVENTX_EFI_PLACEHOLDER_STUB"))
         Write-Host "[*] Created staging placeholder at $TargetBootEfi" -ForegroundColor Gray
@@ -227,7 +277,7 @@ if ($FoundBootEfi) {
 }
 
 # ------------------------------------------------------------------------------
-# 6. Build Virtual Disk Image
+# 6. Build Dual-Partition Virtual Disk Image
 # ------------------------------------------------------------------------------
 if ($UseDiskpart) {
     # Check for elevation
@@ -237,15 +287,19 @@ if ($UseDiskpart) {
     }
 
     $VhdPath = [System.IO.Path]::ChangeExtension($ResolvedDiskPath, ".vhd")
-    Write-Host "[*] Creating native VHD via diskpart: $VhdPath..." -ForegroundColor Yellow
+    Write-Host "[*] Creating native dual-partition VHD via diskpart: $VhdPath..." -ForegroundColor Yellow
 
+    $DataSizeMB = $DiskSizeMB - $EspSizeMB
     $DiskpartScript = @"
 create vdisk file="$VhdPath" maximum=$DiskSizeMB type=expandable
 select vdisk file="$VhdPath"
 attach vdisk
 convert gpt
-create partition efi size=$($DiskSizeMB - 2)
+create partition efi size=$EspSizeMB
 format fs=fat32 quick label="MVX_BOOT"
+assign letter=Y
+create partition primary size=$DataSizeMB
+format fs=exfat quick label="MVX_DATA"
 assign letter=Z
 "@
     $ScriptTemp = New-TemporaryFile
@@ -253,8 +307,11 @@ assign letter=Z
     
     try {
         & diskpart /s $ScriptTemp.FullName
-        Write-Host "[*] Copying ESP payload to Z:\" -ForegroundColor Green
-        Copy-Item -Path "$ResolvedEspDir\*" -Destination "Z:\" -Recurse -Force
+        Write-Host "[*] Copying MVX_BOOT payload to Y:\" -ForegroundColor Green
+        Copy-Item -Path "$ResolvedEspDir\*" -Destination "Y:\" -Recurse -Force
+
+        Write-Host "[*] Copying MVX_DATA payload to Z:\" -ForegroundColor Green
+        Copy-Item -Path "$ResolvedDataDir\*" -Destination "Z:\" -Recurse -Force
     } finally {
         $DetachScript = @"
 select vdisk file="$VhdPath"
@@ -266,27 +323,46 @@ detach vdisk
     }
     Write-Host "[*] VHD created successfully: $VhdPath" -ForegroundColor Green
 } else {
-    # Default: Rootless Pure-Python GPT/FAT Disk Generator
-    Write-Host "[*] Building GPT raw virtual disk via Python FAT builder..." -ForegroundColor Yellow
-    $MakeDiskScript = "$ScriptDir\make_fat_disk.py"
+    # Default: Rootless Pure-Python Dual-Partition GPT Disk Generator
+    Write-Host "[*] Building Dual-Partition GPT disk image via make_dual_partition_disk.py..." -ForegroundColor Yellow
+    $MakeDiskScript = "$ScriptDir\make_dual_partition_disk.py"
     $MakeArgs = @(
         $MakeDiskScript,
-        "--source", $ResolvedEspDir,
+        "--esp-source", $ResolvedEspDir,
+        "--data-source", $ResolvedDataDir,
         "--output", $ResolvedDiskPath,
         "--size-mb", $DiskSizeMB.ToString(),
-        "--label", "MVX_BOOT"
+        "--esp-size-mb", $EspSizeMB.ToString()
     )
 
     & python @MakeArgs
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to build virtual disk image."
+        Write-Error "Failed to build dual-partition virtual disk image."
     }
-    Write-Host "[*] Virtual disk image created: $ResolvedDiskPath" -ForegroundColor Green
+    Write-Host "[*] Dual-partition virtual disk image created: $ResolvedDiskPath" -ForegroundColor Green
+}
+
+# ------------------------------------------------------------------------------
+# 7. Validate Disk Image Structure
+# ------------------------------------------------------------------------------
+Write-Host "[*] Validating dual-partition GPT structure..." -ForegroundColor Yellow
+$ValidateScript = @"
+from core.storage.disk_validator import DiskValidator
+v = DiskValidator(r'$ResolvedDiskPath')
+rep = v.validate_all()
+print(f'Disk validation passed: {rep[\"disk_size_mb\"]} MB ({len(rep[\"partitions\"])} partitions)')
+for p in rep['partitions']:
+    print(f'  - Partition {p[\"index\"]}: {p[\"name\"]} ({p[\"size_mb\"]} MB, LBA {p[\"start_lba\"]}..{p[\"end_lba\"]})')
+"@
+& python -c $ValidateScript
+if ($LASTEXITCODE -ne 0) {
+    Write-Warning "Disk validation encountered warnings or errors."
 }
 
 Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host " Staged ESP directory: $ResolvedEspDir" -ForegroundColor Cyan
-Write-Host " Output disk image:   $ResolvedDiskPath" -ForegroundColor Cyan
+Write-Host " Staged MVX_BOOT directory: $ResolvedEspDir" -ForegroundColor Cyan
+Write-Host " Staged MVX_DATA directory: $ResolvedDataDir" -ForegroundColor Cyan
+Write-Host " Output dual-partition image: $ResolvedDiskPath" -ForegroundColor Cyan
 Write-Host " Next step: Boot with QEMU using:" -ForegroundColor Cyan
 Write-Host "     .\scripts\windows\run_qemu.ps1" -ForegroundColor White
 Write-Host "==========================================================" -ForegroundColor Cyan

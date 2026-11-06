@@ -104,6 +104,18 @@
           "type": "string",
           "description": "Optional custom kernel or bootloader arguments"
         },
+        "recipe": {
+          "type": ["string", "null"],
+          "description": "Optional Linux boot recipe identifier (casper, archiso, dracut, live_boot, generic_kernel)"
+        },
+        "kernel_path": {
+          "type": ["string", "null"],
+          "description": "Optional path to the Linux kernel binary within the ISO loopback"
+        },
+        "initrd_path": {
+          "type": ["string", "null"],
+          "description": "Optional path to the initramfs image within the ISO loopback"
+        },
         "target_path": {
           "type": ["string", "null"],
           "description": "Target EFI or bootloader path if type is chainload"

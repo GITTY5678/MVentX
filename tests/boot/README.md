@@ -49,9 +49,13 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\create_test_disk.ps1 -E
 ```
 
 What this does on Windows:
-- Runs `scripts\generate_test_menu.py` to compile `mventx_menu.cfg`.
-- Stages the EFI System Partition files into `build\esp\`.
-- Invokes `scripts\windows\make_fat_disk.py` to build a valid GPT-partitioned raw disk image (`build\mventx_test.img`) formatted as FAT16/FAT32 without needing admin rights or Linux tools.
+- Validates or compiles the sample configuration into `mventx_menu.cfg`.
+- Stages the EFI System Partition files into `build\esp\` and data partition tree into `build\data\` (`ISO/`, `config/`, `metadata/`, `backups/`).
+- Invokes `scripts\windows\make_dual_partition_disk.py` to build a valid GPT-partitioned raw disk image (`build\mventx_test.img`) with:
+  - **Partition 1 (`MVX_BOOT`)**: 64 MB FAT32 EFI System Partition (`C12A7328-F81F-11D2-BA4B-00A0C93EC93B`).
+  - **Partition 2 (`MVX_DATA`)**: 192 MB exFAT Basic Data Partition (`EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`).
+- Validates the resulting GPT disk image using `core\storage\disk_validator.py`.
+- Runs completely in user-space without needing administrator rights, WSL, or kernel drivers.
 
 #### Step 2: Boot in QEMU
 ```powershell

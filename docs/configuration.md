@@ -4,14 +4,21 @@ This document defines the configuration model, schema rules, and synchronization
 
 ---
 
-## 1. Storage Location
+## 1. Storage Location & Directory Architecture
 
-The configuration file resides directly on the MVentX USB drive:
+The configuration and state directories reside directly on the `MVX_DATA` partition:
 ```
-[MVX_DATA Partition]/mventx/mventx.json
+MVX_DATA/
+├── ISO/                    # User storage for bootable ISO files
+├── config/
+│   └── mventx.json         # Authoritative multi-environment configuration store
+├── metadata/
+│   └── <env_id>.json       # Cached metadata (hashes, architectures, volume labels)
+└── backups/
+    └── mventx_*.json       # Timestamped atomic backups prior to mutations
 ```
 
-Because the configuration file lives on the USB drive, any computer with the MVentX manager installed can manage the drive, preserving complete portability.
+Because the authoritative configuration lives on the USB drive, any computer with the MVentX manager or CLI installed can manage the drive, preserving complete portability.
 
 ---
 
@@ -85,11 +92,37 @@ The configuration file uses JSON format versioning to ensure backward and forwar
 
 ---
 
-## 4. Menu Generation Workflow
+## 4. Menu Generation & Synchronization Workflow
 
-1. User modifies configuration via `mventx-manager` (adds ISO, reorders, enables/disables).
-2. The manager validates input against `schema.json`.
-3. The manager writes `mventx.json` with an atomic rename (writing to `mventx.json.tmp` first, and keeping `mventx.json.bak`).
-4. `core.boot_config.generator` parses the JSON and outputs `/boot/grub/mventx_menu.cfg` on the `MVX_BOOT` partition.
-5. Next boot, GRUB parses `mventx_menu.cfg` and renders the exact list of enabled environments.
+1. User registers or modifies an environment via `ISORegistrationManager` (or `mventx-manager` GUI).
+2. The manager validates input against `schema.json` and security constraints (rejecting injection attempts, directory traversal).
+3. The manager creates a timestamped backup of `mventx.json` in `backups/`.
+4. The manager writes `mventx.json` via atomic file replacement (`.tmp` -> rename).
+5. `StorageManager.sync_boot_menu()` compiles `/boot/grub/mventx_menu.cfg` on `MVX_BOOT`.
+6. **Rollback Safety**: If menu compilation fails, `mventx.json` is immediately restored to its prior state and newly created metadata files are cleaned up.
+7. During target boot, GRUB parses `mventx_menu.cfg` directly without evaluating Python or scanning directories.
+
+---
+
+## 5. Metadata Cache Records (`metadata/<env_id>.json`)
+
+When an ISO is registered, detailed non-invasive header hints and metrics are cached in `metadata/<env_id>.json`:
+
+```json
+{
+  "file_name": "ubuntu-24.04-desktop-amd64.iso",
+  "file_size_bytes": 6215168000,
+  "volume_identifier": "UBUNTU_24_04_X86_64",
+  "system_identifier": "LINUX",
+  "publisher_identifier": "CANONICAL",
+  "detected_architecture": "x86_64",
+  "suggested_boot_method": "linux_generic_loopback",
+  "registered_at": "2026-11-05T19:55:00.000000+00:00",
+  "has_el_torito_boot": true,
+  "checksum": {
+    "algorithm": "sha256",
+    "value": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+}
+```
 
