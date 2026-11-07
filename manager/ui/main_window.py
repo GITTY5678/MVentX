@@ -161,6 +161,11 @@ class MainWindow(QMainWindow):
         self.btn_custom_target.clicked.connect(self._on_select_custom_target)
         hb_layout.addWidget(self.btn_custom_target)
 
+        self.btn_eject = QPushButton("Safely Eject")
+        self.btn_eject.setEnabled(False)
+        self.btn_eject.clicked.connect(self._on_eject_clicked)
+        hb_layout.addWidget(self.btn_eject)
+
         hb_layout.addStretch()
         mc_layout.addWidget(self.header_bar)
 
@@ -207,6 +212,9 @@ class MainWindow(QMainWindow):
 
         self.device_service.devices_refreshed.connect(self._on_devices_refreshed)
         self.device_service.target_changed.connect(self._on_target_changed)
+        self.device_service.eject_completed.connect(self._on_eject_completed)
+        self.device_service.device_connected.connect(self._on_device_connected)
+        self.device_service.device_disconnected.connect(self._on_device_disconnected)
 
         self.iso_service.operation_succeeded.connect(self._on_operation_succeeded)
         self.iso_service.operation_failed.connect(self._on_operation_failed)
@@ -318,8 +326,40 @@ class MainWindow(QMainWindow):
         if target:
             msg = f"Target active: {target.display_name} ({target.data_mount})"
             self.status_bar.showMessage(msg, 5000)
+            self.btn_eject.setEnabled(True)
         else:
             self.status_bar.showMessage("No active MVentX device selected.", 5000)
+            self.btn_eject.setEnabled(False)
+
+    def _on_eject_clicked(self) -> None:
+        if not self.device_service.has_active_target():
+            return
+        target = self.device_service.active_target
+        name = target.display_name if target else "current device"
+        reply = QMessageBox.question(
+            self,
+            "Confirm Safe Eject",
+            f"Are you sure you want to safely eject '{name}'?\n\nAll pending writes will be flushed.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            self.status_bar.showMessage("Ejecting device safely...", 3000)
+            self.device_service.eject_active_device()
+
+    def _on_eject_completed(self, success: bool, message: str) -> None:
+        if success:
+            self.status_bar.showMessage(f"SUCCESS: {message}", 6000)
+            QMessageBox.information(self, "Device Ejected", message)
+        else:
+            self.status_bar.showMessage(f"EJECT ERROR: {message}", 6000)
+            QMessageBox.warning(self, "Eject Failed", message)
+
+    def _on_device_connected(self, dev_name: str) -> None:
+        self.status_bar.showMessage(f"Device connected: {dev_name}. Drive list refreshed.", 5000)
+
+    def _on_device_disconnected(self, device_id: str) -> None:
+        self.status_bar.showMessage(f"WARNING: Device {device_id} was disconnected.", 6000)
 
     # --------------------------------------------------------------------------
     # Notification Handlers

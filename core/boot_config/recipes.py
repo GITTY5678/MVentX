@@ -26,7 +26,12 @@ class LinuxBootRecipe:
         vol = volume_id or "MVX_DATA"
         # Quote iso_path if it contains spaces so Linux kernel cmdline does not split arguments
         safe_iso_path = f'"{iso_path}"' if " " in iso_path and not iso_path.startswith('"') else iso_path
-        args = self.default_args.replace("${iso_path}", safe_iso_path).replace("${vol_id}", vol)
+        args = (
+            self.default_args
+            .replace("${iso_path}", safe_iso_path)
+            .replace("${vol_id}", vol)
+            .replace("${iso_vol_id}", vol)
+        )
         if custom_args:
             args = f"{args} {custom_args}".strip()
         return args
@@ -42,7 +47,7 @@ RECIPE_CASPER = LinuxBootRecipe(
     kernel_path="/casper/vmlinuz",
     initrd_path="/casper/initrd",
     default_args="iso-scan/filename=${iso_path} boot=casper file=/cdrom/preseed/ubuntu.seed quiet splash ---",
-    description="Ubuntu, Linux Mint, Pop!_OS, Elementary OS, and derivatives using Casper initramfs",
+    description="Ubuntu, Linux Mint, Pop!_OS, Elementary OS, Zorin OS, and derivatives using Casper initramfs",
 )
 
 RECIPE_ARCHISO = LinuxBootRecipe(
@@ -60,7 +65,7 @@ RECIPE_DRACUT = LinuxBootRecipe(
     kernel_path="/images/pxeboot/vmlinuz",
     initrd_path="/images/pxeboot/initrd.img",
     default_args="root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path} rd.live.image quiet",
-    description="Fedora, CentOS, RHEL, and derivatives using Dracut live module",
+    description="Fedora, CentOS, RHEL, Rocky Linux, AlmaLinux, and derivatives using Dracut live module",
 )
 
 RECIPE_LIVE_BOOT = LinuxBootRecipe(
@@ -69,7 +74,43 @@ RECIPE_LIVE_BOOT = LinuxBootRecipe(
     kernel_path="/live/vmlinuz",
     initrd_path="/live/initrd.img",
     default_args="boot=live findiso=${iso_path} union=overlay config components quiet",
-    description="Debian Live, Clonezilla, Kali Linux, and distributions using Debian live-boot",
+    description="Debian Live, Clonezilla, Kali Linux, Rescuezilla, and distributions using Debian live-boot",
+)
+
+RECIPE_OPENSUSE = LinuxBootRecipe(
+    recipe_id="opensuse",
+    name="openSUSE Leap / Tumbleweed Live",
+    kernel_path="/boot/x86_64/loader/linux",
+    initrd_path="/boot/x86_64/loader/initrd",
+    default_args="root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path} rd.live.image splash=silent quiet",
+    description="openSUSE Leap and Tumbleweed Live images using Kiwi/Dracut initramfs",
+)
+
+RECIPE_MX_LINUX = LinuxBootRecipe(
+    recipe_id="mx_linux",
+    name="MX Linux / antiX Live",
+    kernel_path="/antiX/vmlinuz",
+    initrd_path="/antiX/initrd.gz",
+    default_args="fromiso=${iso_path} bootdev=MVX_DATA quiet splash",
+    description="MX Linux and antiX Live distributions using linux-live bootloader",
+)
+
+RECIPE_ALPINE = LinuxBootRecipe(
+    recipe_id="alpine",
+    name="Alpine Linux Virt / Standard",
+    kernel_path="/boot/vmlinuz-virt",
+    initrd_path="/boot/initramfs-virt",
+    default_args="modules=loop,squashfs,sd-mod,usb-storage modloop=/boot/modloop-virt quiet",
+    description="Alpine Linux installation and live environments using modloop",
+)
+
+RECIPE_SYSTEMRESCUE = LinuxBootRecipe(
+    recipe_id="systemrescue",
+    name="SystemRescue Live (ArchISO)",
+    kernel_path="/sysrescue/boot/x86_64/vmlinuz",
+    initrd_path="/sysrescue/boot/x86_64/sysrescue.img",
+    default_args="img_dev=/dev/disk/by-label/MVX_DATA img_loop=${iso_path} archisobasedir=sysrescue earlymodules=loop copytoram=n",
+    description="SystemRescue rescue environment (v6.x+ based on ArchISO)",
 )
 
 RECIPE_GENERIC_KERNEL = LinuxBootRecipe(
@@ -78,29 +119,62 @@ RECIPE_GENERIC_KERNEL = LinuxBootRecipe(
     kernel_path="/linux",
     initrd_path="/initrd.gz",
     default_args="quiet",
-    description="Generic Linux netboot, Alpine Linux, or custom kernel/initrd configurations",
+    description="Generic Linux netboot or custom kernel/initrd configurations",
 )
 
 REGISTERED_RECIPES: Dict[str, LinuxBootRecipe] = {
+    # Casper family
     "casper": RECIPE_CASPER,
     "ubuntu": RECIPE_CASPER,
     "mint": RECIPE_CASPER,
     "pop": RECIPE_CASPER,
+    "elementary": RECIPE_CASPER,
+    "zorin": RECIPE_CASPER,
     "linux_casper": RECIPE_CASPER,
+    # ArchISO family
     "archiso": RECIPE_ARCHISO,
     "arch": RECIPE_ARCHISO,
     "manjaro": RECIPE_ARCHISO,
+    "endeavour": RECIPE_ARCHISO,
+    "endeavouros": RECIPE_ARCHISO,
     "linux_archiso": RECIPE_ARCHISO,
+    # Dracut family
     "dracut": RECIPE_DRACUT,
     "fedora": RECIPE_DRACUT,
     "rhel": RECIPE_DRACUT,
     "centos": RECIPE_DRACUT,
+    "rocky": RECIPE_DRACUT,
+    "alma": RECIPE_DRACUT,
+    "almalinux": RECIPE_DRACUT,
     "linux_dracut": RECIPE_DRACUT,
+    # Debian live-boot family
     "live_boot": RECIPE_LIVE_BOOT,
     "debian": RECIPE_LIVE_BOOT,
     "clonezilla": RECIPE_LIVE_BOOT,
     "kali": RECIPE_LIVE_BOOT,
+    "rescuezilla": RECIPE_LIVE_BOOT,
+    "tails": RECIPE_LIVE_BOOT,
     "linux_live_boot": RECIPE_LIVE_BOOT,
+    # openSUSE
+    "opensuse": RECIPE_OPENSUSE,
+    "suse": RECIPE_OPENSUSE,
+    "tumbleweed": RECIPE_OPENSUSE,
+    "leap": RECIPE_OPENSUSE,
+    "linux_opensuse": RECIPE_OPENSUSE,
+    # MX Linux / antiX
+    "mx_linux": RECIPE_MX_LINUX,
+    "mx": RECIPE_MX_LINUX,
+    "antix": RECIPE_MX_LINUX,
+    "linux_mx": RECIPE_MX_LINUX,
+    # Alpine Linux
+    "alpine": RECIPE_ALPINE,
+    "alpine_linux": RECIPE_ALPINE,
+    "linux_alpine": RECIPE_ALPINE,
+    # SystemRescue
+    "systemrescue": RECIPE_SYSTEMRESCUE,
+    "sysrescue": RECIPE_SYSTEMRESCUE,
+    "linux_systemrescue": RECIPE_SYSTEMRESCUE,
+    # Generic fallback
     "generic_kernel": RECIPE_GENERIC_KERNEL,
     "generic": RECIPE_GENERIC_KERNEL,
     "linux_generic_loopback": RECIPE_GENERIC_KERNEL,
@@ -117,13 +191,21 @@ def get_recipe(identifier: str) -> LinuxBootRecipe:
 def detect_recipe_from_hints(*hints: Optional[str]) -> LinuxBootRecipe:
     """Infer the most appropriate boot recipe from ISO filename, volume ID, or method string."""
     combined = " ".join(h.lower() for h in hints if h)
-    if any(k in combined for k in ("casper", "ubuntu", "mint", "pop-os", "elementary")):
+    if any(k in combined for k in ("casper", "ubuntu", "mint", "pop-os", "elementary", "zorin")):
         return RECIPE_CASPER
+    if any(k in combined for k in ("systemrescue", "sysrescue")):
+        return RECIPE_SYSTEMRESCUE
     if any(k in combined for k in ("archiso", "archlinux", "arch-", "manjaro", "endeavour")):
         return RECIPE_ARCHISO
+    if any(k in combined for k in ("opensuse", "suse", "tumbleweed", "leap")):
+        return RECIPE_OPENSUSE
+    if any(k in combined for k in ("mx-", "mx_linux", "antix", "mxlinux")):
+        return RECIPE_MX_LINUX
+    if any(k in combined for k in ("alpine", "alpine-")):
+        return RECIPE_ALPINE
     if any(k in combined for k in ("dracut", "fedora", "rhel", "centos", "rocky", "alma")):
         return RECIPE_DRACUT
-    if any(k in combined for k in ("live-boot", "clonezilla", "debian-live", "kali", "tails")):
+    if any(k in combined for k in ("live-boot", "clonezilla", "debian-live", "debian", "kali", "tails", "rescuezilla")):
         return RECIPE_LIVE_BOOT
     return RECIPE_GENERIC_KERNEL
 

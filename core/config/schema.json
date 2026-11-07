@@ -76,7 +76,7 @@
         "type": {
           "type": "string",
           "description": "Classification of the bootable environment",
-          "enum": ["iso", "chainload"]
+          "enum": ["iso", "chainload", "windows"]
         },
         "iso_path": {
           "type": ["string", "null"],
@@ -123,6 +123,14 @@
         "target_hint": {
           "type": ["string", "null"],
           "description": "Device hint for chainloading (e.g., hd0,gpt1)"
+        },
+        "staged_subfolder": {
+          "type": ["string", "null"],
+          "description": "Optional subdirectory on data partition where Windows media is staged"
+        },
+        "bootloader_path": {
+          "type": ["string", "null"],
+          "description": "Optional relative path to EFI bootloader for Windows environments"
         },
         "checksum": {
           "type": ["object", "null"],

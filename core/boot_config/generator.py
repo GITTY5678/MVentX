@@ -142,7 +142,9 @@ KNOWN_BOOT_METHODS = {
     "linux_dracut",
     "linux_live_boot",
     "chainload_efi",
+    "windows_extracted_media",
     "windows_wimboot",
+    "windows_host_chainload",
     "iso_loopback",
     "generic_uefi",
 }
@@ -199,9 +201,9 @@ class GrubMenuGenerator:
             sanitize_display_name(entry["display_name"])
 
             env_type = entry["type"]
-            if env_type not in ("iso", "chainload"):
+            if env_type not in ("iso", "chainload", "windows"):
                 raise ConfigValidationError(
-                    f"Environment '{env_id}' has invalid type '{env_type}'; must be 'iso' or 'chainload'"
+                    f"Environment '{env_id}' has invalid type '{env_type}'; must be 'iso', 'chainload', or 'windows'"
                 )
 
             boot_method = entry["boot_method"]
@@ -366,6 +368,26 @@ class GrubMenuGenerator:
                         '    echo "Error: Missing target path for chainloading."',
                         '    sleep 5',
                     ])
+            elif env_type == "windows" or boot_method.startswith("windows_"):
+                from core.boot_config.windows_boot_generator import generate_windows_boot_commands
+                from core.boot_config.windows_boot_strategy import WindowsBootStrategy
+
+                if boot_method == "windows_host_chainload":
+                    strat = WindowsBootStrategy.HOST_CHAINLOAD
+                elif boot_method == "windows_wimboot":
+                    strat = WindowsBootStrategy.WIMBOOT_PE
+                else:
+                    strat = WindowsBootStrategy.EXTRACTED_MEDIA
+
+                bl_path = sanitize_path(entry.get("bootloader_path")) or "/efi/boot/bootx64.efi"
+                staged_sub = sanitize_path(entry.get("staged_subfolder"))
+                win_cmds = generate_windows_boot_commands(
+                    strategy=strat,
+                    bootloader_path=bl_path,
+                    staged_subfolder=staged_sub,
+                    custom_name=display_name,
+                )
+                lines.extend(win_cmds)
             else:
                 lines.extend([
                     '    echo "Unsupported environment type."',

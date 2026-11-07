@@ -92,7 +92,8 @@ class TestISOInspector(unittest.TestCase):
         self.assertIn("/boot", res.directories)
         self.assertIsNotNone(res.discovered_kernel_path)
         self.assertIsNotNone(res.discovered_initrd_path)
-        self.assertIn(res.detected_recipe, ("generic_kernel", "dracut", "live_boot"))
+        self.assertEqual(res.detected_recipe, "alpine")
+        self.assertEqual(res.confidence, "high")
 
     def test_space_in_iso_path_handling(self):
         """Verify paths containing spaces are safely quoted in loopback commands."""

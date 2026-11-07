@@ -4,11 +4,15 @@ import unittest
 
 from core.boot_config.generator import GrubMenuGenerator
 from core.boot_config.recipes import (
+    RECIPE_ALPINE,
     RECIPE_ARCHISO,
     RECIPE_CASPER,
     RECIPE_DRACUT,
     RECIPE_GENERIC_KERNEL,
     RECIPE_LIVE_BOOT,
+    RECIPE_MX_LINUX,
+    RECIPE_OPENSUSE,
+    RECIPE_SYSTEMRESCUE,
     detect_recipe_from_hints,
     generate_loopback_boot_commands,
     get_recipe,
@@ -35,7 +39,26 @@ class TestLinuxBootRecipes(unittest.TestCase):
         self.assertEqual(get_recipe("live_boot"), RECIPE_LIVE_BOOT)
         self.assertEqual(get_recipe("debian"), RECIPE_LIVE_BOOT)
         self.assertEqual(get_recipe("clonezilla"), RECIPE_LIVE_BOOT)
+        self.assertEqual(get_recipe("rescuezilla"), RECIPE_LIVE_BOOT)
         self.assertEqual(get_recipe("linux_live_boot"), RECIPE_LIVE_BOOT)
+
+        self.assertEqual(get_recipe("opensuse"), RECIPE_OPENSUSE)
+        self.assertEqual(get_recipe("suse"), RECIPE_OPENSUSE)
+        self.assertEqual(get_recipe("tumbleweed"), RECIPE_OPENSUSE)
+        self.assertEqual(get_recipe("leap"), RECIPE_OPENSUSE)
+
+        self.assertEqual(get_recipe("mx_linux"), RECIPE_MX_LINUX)
+        self.assertEqual(get_recipe("mx"), RECIPE_MX_LINUX)
+        self.assertEqual(get_recipe("antix"), RECIPE_MX_LINUX)
+
+        self.assertEqual(get_recipe("alpine"), RECIPE_ALPINE)
+        self.assertEqual(get_recipe("alpine_linux"), RECIPE_ALPINE)
+
+        self.assertEqual(get_recipe("systemrescue"), RECIPE_SYSTEMRESCUE)
+        self.assertEqual(get_recipe("sysrescue"), RECIPE_SYSTEMRESCUE)
+
+        self.assertEqual(get_recipe("zorin"), RECIPE_CASPER)
+        self.assertEqual(get_recipe("elementary"), RECIPE_CASPER)
 
         self.assertEqual(get_recipe("unknown_custom"), RECIPE_GENERIC_KERNEL)
 
@@ -50,8 +73,32 @@ class TestLinuxBootRecipes(unittest.TestCase):
             RECIPE_CASPER,
         )
         self.assertEqual(
+            detect_recipe_from_hints("Zorin-OS-17.1-Core-64-bit.iso", "Zorin OS"),
+            RECIPE_CASPER,
+        )
+        self.assertEqual(
             detect_recipe_from_hints("archlinux-2026.03.01-x86_64.iso", "ARCH_202603"),
             RECIPE_ARCHISO,
+        )
+        self.assertEqual(
+            detect_recipe_from_hints("systemrescue-11.00-amd64.iso", "RESCUE1100"),
+            RECIPE_SYSTEMRESCUE,
+        )
+        self.assertEqual(
+            detect_recipe_from_hints("openSUSE-Tumbleweed-KDE-Live-x86_64.iso", "openSUSE_Tumbleweed"),
+            RECIPE_OPENSUSE,
+        )
+        self.assertEqual(
+            detect_recipe_from_hints("MX-23.2_x64.iso", "MX-Live"),
+            RECIPE_MX_LINUX,
+        )
+        self.assertEqual(
+            detect_recipe_from_hints("alpine-standard-3.20.0-x86_64.iso", "alpine-std"),
+            RECIPE_ALPINE,
+        )
+        self.assertEqual(
+            detect_recipe_from_hints("rescuezilla-2.4.2-64bit.noble.iso", "Rescuezilla"),
+            RECIPE_LIVE_BOOT,
         )
         self.assertEqual(
             detect_recipe_from_hints("Fedora-Workstation-Live-x86_64-40-1.14.iso", "Fedora-WS-Live-40"),
@@ -100,6 +147,41 @@ class TestLinuxBootRecipes(unittest.TestCase):
         self.assertIn("root=live:CDLABEL=Fedora-WS-40", args)
         self.assertIn("iso-scan.filename=/ISO/fedora.iso", args)
         self.assertIn("rd.live.image", args)
+
+    def test_opensuse_argument_formatting(self):
+        """Verify openSUSE recipe argument replacement."""
+        args = RECIPE_OPENSUSE.format_args(
+            iso_path="/ISO/openSUSE.iso",
+            volume_id="openSUSE_Live",
+        )
+        self.assertIn("root=live:CDLABEL=openSUSE_Live", args)
+        self.assertIn("iso-scan.filename=/ISO/openSUSE.iso", args)
+        self.assertIn("rd.live.image", args)
+
+    def test_mx_linux_argument_formatting(self):
+        """Verify MX Linux recipe argument replacement."""
+        args = RECIPE_MX_LINUX.format_args(
+            iso_path="/ISO/MX-23.iso",
+        )
+        self.assertIn("fromiso=/ISO/MX-23.iso", args)
+        self.assertIn("bootdev=MVX_DATA", args)
+
+    def test_alpine_argument_formatting(self):
+        """Verify Alpine Linux recipe argument replacement."""
+        args = RECIPE_ALPINE.format_args(
+            iso_path="/ISO/alpine.iso",
+        )
+        self.assertIn("modloop=/boot/modloop-virt", args)
+        self.assertIn("modules=loop,squashfs,sd-mod,usb-storage", args)
+
+    def test_systemrescue_argument_formatting(self):
+        """Verify SystemRescue recipe argument replacement."""
+        args = RECIPE_SYSTEMRESCUE.format_args(
+            iso_path="/ISO/systemrescue.iso",
+        )
+        self.assertIn("img_dev=/dev/disk/by-label/MVX_DATA", args)
+        self.assertIn("img_loop=/ISO/systemrescue.iso", args)
+        self.assertIn("archisobasedir=sysrescue", args)
 
     def test_generate_loopback_boot_commands(self):
         """Verify generated GRUB script lines contain all essential safety checks."""

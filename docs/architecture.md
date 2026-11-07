@@ -53,10 +53,11 @@ Traditional multiboot solutions often tightly couple bootloader scripts to propr
 - **Bootloader Theme & UI**: Graphical GRUB theme rendering entries defined in the generated menu.
 
 ### 2.2 Core Subsystem (`core/`)
-- **`core/config`**: JSON Schema definitions, configuration parsers, and defaults validation.
-- **`core/iso_manager`**: Manual registration, ISO metadata extraction (labels, architectures, checksums), and integrity validation.
+- **`core/config`**: JSON Schema definitions, configuration validator, and defaults validation.
+- **`core/iso_manager`**: Manual registration, ISO metadata extraction, deep ISO inspection, Windows ISO inspection (`windows_iso_inspector.py`), and Windows media staging and sizing (`windows_media_manager.py`).
 - **`core/storage`**: USB device detection, partition mounting/unmounting, and path resolution across platforms.
-- **`core/boot_config`**: Converts JSON configuration into native GRUB 2 menu scripts (`mventx_menu.cfg`) using the Linux distribution recipe engine (`recipes.py` for Casper, ArchISO, Dracut, Live-Boot, and Generic).
+- **`core/host`**: Cross-platform host integration, strong device identity fingerprinting, lifecycle state machine, and safe ejection.
+- **`core/boot_config`**: Converts JSON configuration into native GRUB 2 menu scripts (`mventx_menu.cfg`) using the Linux distribution recipe engine (`recipes.py`) and Windows boot generator (`windows_boot_generator.py`, `windows_boot_strategy.py`).
 
 ### 2.3 Management Subsystem (`manager/`)
 - **PySide6 Desktop Application**: Modern graphite dark theme GUI built on a decoupled service layer:
@@ -115,6 +116,7 @@ MVX_BOOT/
 ```
 MVX_DATA/
 ├── ISO/                         # User-accessible storage for bootable ISO files
+├── windows/                     # Staged Windows installation media environments
 ├── config/
 │   └── mventx.json              # Authoritative environment registration & settings
 ├── metadata/                    # Extracted ISO labels, hashes, and custom icons
@@ -210,6 +212,25 @@ MVentX provides an end-to-end media preparation subsystem (`installer/`) capable
 5. **Desktop UI Integration**:
    - `manager/ui/usb_installer.py` integrates with the PySide6 desktop suite, featuring layout previews, background `QThread` execution, progress reporting, and post-installation verification reports.
 
+### 3.9 Cross-Platform Host Integration Subsystem (Milestone 10)
+
+The host integration layer (`core/host/`) connects the PySide6 desktop suite to existing MVentX storage devices across Windows 10/11 and Linux:
+1. **Multi-Attribute Classification (`core/host/device_classification.py`)**:
+   - Completely separates detection, classification, mounting, and modification.
+   - Non-destructive inspection of GPT partition tables, ESP and Basic Data GUIDs, standard directory skeleton (`ISO/`, `config/`, `metadata/`, `backups/`), and JSON schema compliance.
+   - Identifies devices into 5 explicit statuses: `VALID_MVENTX`, `INCOMPLETE_INSTALLATION`, `CORRUPTED_INSTALLATION`, `ORDINARY_STORAGE`, and `INACCESSIBLE`.
+2. **Strong Device Identity & Pre-Write Verification (`core/host/device_identity.py`)**:
+   - Computes deterministic SHA-256 fingerprints from GPT Disk GUID, partition UUIDs, serial numbers, vendor, model, and capacity.
+   - `revalidate_device_identity()` re-probes device identity immediately before every write, preventing drive-letter collision and protecting reconnected or imposter media.
+3. **Device Lifecycle State Machine (`core/host/device_state.py`)**:
+   - Enforces an explicit 14-state progression (`DETECTED` -> `IDENTIFYING` -> `IDENTIFIED` -> `VALIDATING` -> `READY` <-> `BUSY` -> `EJECTING` -> `EJECTED`, with `DISCONNECTED` guard).
+4. **Atomic Configuration Synchronization with Safe Rollback (`core/host/filesystem_access.py`)**:
+   - Validates schema, creates timestamped backups in `backups/`, and writes atomically.
+   - Restores original `mventx.json` if GRUB boot menu compilation fails.
+5. **Safe Device Ejection & Disconnection Monitoring**:
+   - `SafeEjector` asserts idle state, flushes filesystem buffers, releases MVentX mounts, and calls platform removal APIs.
+   - `DeviceMonitor` listens for device arrival and removal, immediately clearing targets and blocking writes on disconnection.
+
 ---
 
 ## 4. Key Design Invariants
@@ -219,4 +240,25 @@ MVentX provides an end-to-end media preparation subsystem (`installer/`) capable
 3. **Deterministic Boot Menus**: Boot order is explicitly preserved via configuration index order.
 4. **Backup Before Write**: Any rewrite of `mventx.json` or `mventx_menu.cfg` creates an atomic timestamped backup in `backups/` to prevent configuration corruption.
 5. **Universal Portability**: Both FAT32 and exFAT partitions mount natively on Windows 11, macOS, and Linux without external filesystem drivers.
+
+---
+
+## 7. Linux Distribution Boot Architecture & Loopback Recipes
+
+MVentX employs a decoupled loopback boot architecture for Linux distributions. Registered ISO files reside unextracted on `MVX_DATA/ISO/`. At boot time, GRUB dynamically mounts the target ISO via `loopback loop0 ($mventx_data_dev)/ISO/...` and passes kernel command-line arguments specific to the distribution's early initramfs discovery mechanism:
+
+| Distribution Family | Recipe ID | Boot Mechanism | Early Discovery Parameter |
+| :--- | :--- | :--- | :--- |
+| **Casper** | `casper` | Casper initramfs (Ubuntu, Mint, Pop!_OS, Zorin, Elementary) | `iso-scan/filename=${iso_path} boot=casper` |
+| **ArchISO** | `archiso` | `mkinitcpio-archiso` hook (Arch, Manjaro, EndeavourOS) | `img_dev=/dev/disk/by-label/MVX_DATA img_loop=${iso_path}` |
+| **SystemRescue** | `systemrescue` | ArchISO with custom base directory | `img_dev=... img_loop=... archisobasedir=sysrescue` |
+| **Dracut** | `dracut` | `dmsquash-live` module (Fedora, RHEL, CentOS, Rocky, Alma) | `root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path}` |
+| **Debian Live-Boot** | `live_boot` | Debian `live-boot` (Debian Live, Clonezilla, Kali, Rescuezilla) | `boot=live findiso=${iso_path} union=overlay` |
+| **openSUSE** | `opensuse` | Kiwi / Dracut Live (Leap, Tumbleweed) | `root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path}` |
+| **MX Linux** | `mx_linux` | `linux-live` init (MX Linux, antiX) | `fromiso=${iso_path} bootdev=MVX_DATA` |
+| **Alpine Linux** | `alpine` | Alpine `mkinitfs` (modloop) | `modules=loop,squashfs modloop=/boot/modloop-virt` |
+| **Generic Kernel** | `generic_kernel` | Custom / direct kernel and initrd loopback | User-defined parameters |
+
+### Rock Ridge (`SUSP/RRIP`) Inspection
+The backend `ISOInspector` directly parses Rock Ridge Alternate Name (`NM`) records from the System Use Area (SUA) of ISO 9660 directory entries. This ensures the kernel, initramfs, and modloop paths passed to GRUB precisely match the POSIX filenames resolved by GRUB's `iso9660` module, preventing boot-time path mismatches.
 

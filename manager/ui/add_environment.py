@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.iso_manager import ISOValidationResult, ISOValidator
+from core.iso_manager.windows_iso_inspector import WindowsISOInspector, WindowsInspectionResult
 from manager.services.iso_service import ISOService
 from manager.ui.styles import (
     COLOR_ACCENT,
@@ -55,6 +56,7 @@ class AddEnvironmentScreen(QWidget):
         self.iso_service = iso_service
         self._selected_iso_path: Optional[Path] = None
         self._validation_result: Optional[ISOValidationResult] = None
+        self._windows_inspection: Optional[WindowsInspectionResult] = None
 
         self._setup_ui()
         self.iso_service.device_service.target_changed.connect(self.refresh_unregistered_list)
@@ -146,6 +148,7 @@ class AddEnvironmentScreen(QWidget):
         self.method_combo.addItem("linux_generic_loopback", "linux_generic_loopback")
         self.method_combo.addItem("arch_loopback", "arch_loopback")
         self.method_combo.addItem("debian_live_loopback", "debian_live_loopback")
+        self.method_combo.addItem("windows_extracted_media", "windows_extracted_media")
         form.addRow("Boot Method:", self.method_combo)
 
         self.desc_edit = QLineEdit()
@@ -250,28 +253,58 @@ class AddEnvironmentScreen(QWidget):
             self.val_status_lbl.setStyleSheet("color: #9ca3af; font-weight: 500;")
             self.val_details_lbl.setText("")
             self.btn_register.setEnabled(False)
+            self._windows_inspection = None
             return
 
         res = self.iso_service.validate_iso(self._selected_iso_path)
         self._validation_result = res
 
         if res.is_valid:
-            status_text = f"VALID: {res.filesystem_format} ({_fmt_bytes(res.file_size_bytes)})"
-            if res.has_el_torito_boot:
-                status_text += " | El Torito Boot Record Detected"
-            self.val_status_lbl.setText(status_text)
-            self.val_status_lbl.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: 600;")
+            # Check for Windows Installation Media
+            win_inspector = WindowsISOInspector(self._selected_iso_path)
+            win_res = win_inspector.inspect()
+            self._windows_inspection = win_res if win_res.is_windows_media else None
 
-            details = f"Volume ID: {res.volume_identifier or 'None'} | System ID: {res.system_identifier or 'None'}\n"
-            details += f"Notice: {res.disclaimer}"
-            self.val_details_lbl.setText(details)
+            if win_res.is_windows_media:
+                status_text = (
+                    f"WINDOWS MEDIA DETECTED: {win_res.architecture.value.upper()} "
+                    f"({_fmt_bytes(res.file_size_bytes)})"
+                )
+                self.val_status_lbl.setText(status_text)
+                self.val_status_lbl.setStyleSheet(f"color: {COLOR_ACCENT}; font-weight: 600;")
 
-            # Pre-fill display name if empty
-            if not self.name_edit.text().strip():
-                clean_name = self._selected_iso_path.stem.replace("-", " ").replace("_", " ").title()
-                if res.volume_identifier:
-                    clean_name = res.volume_identifier.replace("_", " ").title()
-                self.name_edit.setText(clean_name)
+                details = (
+                    f"Bootloader: {win_res.primary_bootloader} | BCD Store: {win_res.bcd_path or 'Not found'}\n"
+                    f"Payload: {win_res.payload_path} ({win_res.payload_type.value})\n"
+                    f"Strategy: Staged Media on MVX_DATA with direct UEFI chainloading."
+                )
+                self.val_details_lbl.setText(details)
+
+                # Automatically switch boot method to windows_extracted_media
+                idx = self.method_combo.findText("windows_extracted_media")
+                if idx >= 0:
+                    self.method_combo.setCurrentIndex(idx)
+
+                # Pre-fill display name if empty
+                if not self.name_edit.text().strip():
+                    self.name_edit.setText(f"Windows Setup ({win_res.architecture.value.upper()})")
+            else:
+                status_text = f"VALID: {res.filesystem_format} ({_fmt_bytes(res.file_size_bytes)})"
+                if res.has_el_torito_boot:
+                    status_text += " | El Torito Boot Record Detected"
+                self.val_status_lbl.setText(status_text)
+                self.val_status_lbl.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: 600;")
+
+                details = f"Volume ID: {res.volume_identifier or 'None'} | System ID: {res.system_identifier or 'None'}\n"
+                details += f"Notice: {res.disclaimer}"
+                self.val_details_lbl.setText(details)
+
+                # Pre-fill display name if empty
+                if not self.name_edit.text().strip():
+                    clean_name = self._selected_iso_path.stem.replace("-", " ").replace("_", " ").title()
+                    if res.volume_identifier:
+                        clean_name = res.volume_identifier.replace("_", " ").title()
+                    self.name_edit.setText(clean_name)
 
             self.btn_register.setEnabled(True)
         else:
@@ -279,6 +312,7 @@ class AddEnvironmentScreen(QWidget):
             self.val_status_lbl.setStyleSheet(f"color: {COLOR_DANGER}; font-weight: 600;")
             self.val_details_lbl.setText("; ".join(res.errors))
             self.btn_register.setEnabled(False)
+            self._windows_inspection = None
 
     def _on_register_clicked(self) -> None:
         if not self._selected_iso_path:
@@ -289,15 +323,30 @@ class AddEnvironmentScreen(QWidget):
             QMessageBox.warning(self, "Validation Error", "Please provide a custom display name.")
             return
 
-        rec = self.iso_service.register_iso(
-            iso_file=self._selected_iso_path.name,
-            display_name=name,
-            boot_method=self.method_combo.currentText(),
-            description=self.desc_edit.text().strip() or None,
-            custom_args=self.args_edit.text().strip() or None,
-            enabled=self.enabled_cb.isChecked(),
-            calculate_hash=self.hash_cb.isChecked(),
-        )
+        boot_method = self.method_combo.currentText()
+        if boot_method == "windows_extracted_media":
+            bootloader = (
+                self._windows_inspection.primary_bootloader
+                if self._windows_inspection and self._windows_inspection.primary_bootloader
+                else "/efi/boot/bootx64.efi"
+            )
+            rec = self.iso_service.register_windows_media(
+                display_name=name,
+                bootloader_path=bootloader,
+                iso_file=self._selected_iso_path,
+                description=self.desc_edit.text().strip() or None,
+                enabled=self.enabled_cb.isChecked(),
+            )
+        else:
+            rec = self.iso_service.register_iso(
+                iso_file=self._selected_iso_path.name,
+                display_name=name,
+                boot_method=boot_method,
+                description=self.desc_edit.text().strip() or None,
+                custom_args=self.args_edit.text().strip() or None,
+                enabled=self.enabled_cb.isChecked(),
+                calculate_hash=self.hash_cb.isChecked(),
+            )
 
         if rec:
             QMessageBox.information(

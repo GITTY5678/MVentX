@@ -80,7 +80,25 @@ class ISOInspector:
             # Ignore . and ..
             if raw_name not in ("\x00", "\x01"):
                 clean_name = raw_name.split(";")[0].strip()
-                entries.append((clean_name, is_dir, ext_lba, ext_len))
+                # Check for Rock Ridge Alternate Name (NM) in System Use Area (SUA)
+                sua_offset = 33 + name_len
+                if sua_offset % 2 == 1:
+                    sua_offset += 1
+                sua = rec[sua_offset:]
+                rr_name: Optional[str] = None
+                s_idx = 0
+                while s_idx + 4 <= len(sua):
+                    sig = sua[s_idx : s_idx + 2]
+                    slen = sua[s_idx + 2]
+                    if slen < 4 or s_idx + slen > len(sua):
+                        break
+                    if sig == b"NM" and slen >= 5:
+                        rr_name = sua[s_idx + 5 : s_idx + slen].decode("utf-8", errors="ignore")
+                        break
+                    s_idx += slen
+
+                effective_name = rr_name if rr_name else clean_name
+                entries.append((effective_name, is_dir, ext_lba, ext_len))
 
             offset += rec_len
 
@@ -132,7 +150,7 @@ class ISOInspector:
                         discovered_files[p] = (lba, length)
 
                 # Scan up to 3 directory tiers for distribution structures
-                tier1_candidates = ["/casper", "/live", "/boot", "/arch", "/images", "/isolinux"]
+                tier1_candidates = ["/casper", "/live", "/boot", "/arch", "/images", "/isolinux", "/antix", "/sysrescue"]
                 for d in list(discovered_dirs.keys()):
                     if any(d.startswith(c) for c in tier1_candidates):
                         lba, length = discovered_dirs[d]
@@ -144,7 +162,7 @@ class ISOInspector:
                             else:
                                 discovered_files[sp] = (slba, slen)
 
-                tier2_candidates = ["/arch/boot", "/images/pxeboot", "/boot/grub"]
+                tier2_candidates = ["/arch/boot", "/images/pxeboot", "/boot/grub", "/boot/x86_64", "/sysrescue/boot"]
                 for d in list(discovered_dirs.keys()):
                     if d in tier2_candidates:
                         lba, length = discovered_dirs[d]
@@ -156,13 +174,15 @@ class ISOInspector:
                             else:
                                 discovered_files[sp] = (slba, slen)
 
-                if "/arch/boot/x86_64" in discovered_dirs:
-                    lba, length = discovered_dirs["/arch/boot/x86_64"]
-                    subs = self._read_dir_records(f, lba, length)
-                    for sname, sis_dir, slba, slen in subs:
-                        sp = f"/arch/boot/x86_64/{sname.lower().rstrip('.')}"
-                        if not sis_dir:
-                            discovered_files[sp] = (slba, slen)
+                tier3_candidates = ["/arch/boot/x86_64", "/boot/x86_64/loader", "/sysrescue/boot/x86_64"]
+                for d in list(discovered_dirs.keys()):
+                    if d in tier3_candidates:
+                        lba, length = discovered_dirs[d]
+                        subs = self._read_dir_records(f, lba, length)
+                        for sname, sis_dir, slba, slen in subs:
+                            sp = f"{d}/{sname.lower().rstrip('.')}"
+                            if not sis_dir:
+                                discovered_files[sp] = (slba, slen)
 
         except OSError as exc:
             return InspectionResult(
@@ -195,7 +215,22 @@ class ISOInspector:
             initrd_path = casper_initrds[0] if casper_initrds else "/casper/initrd"
             warnings.append("Casper directory detected but standard kernel/initrd filenames incomplete")
 
-        # 2. ArchISO (Arch Linux / Manjaro)
+        # 2. SystemRescue (ArchISO derivative with /sysrescue base)
+        if not recipe:
+            sysrescue_kernels = [f for f in files_list if f.startswith("/sysrescue/boot/x86_64/vmlinuz") or (f.startswith("/sysrescue/") and "vmlinuz" in f)]
+            sysrescue_initrds = [f for f in files_list if "sysrescue" in f and ("img" in f or "initrd" in f)]
+            if sysrescue_kernels and sysrescue_initrds:
+                recipe = "systemrescue"
+                confidence = "high"
+                kernel_path = sysrescue_kernels[0]
+                initrd_path = sysrescue_initrds[0]
+            elif any(d.startswith("/sysrescue") for d in dirs_list):
+                recipe = "systemrescue"
+                confidence = "medium"
+                kernel_path = sysrescue_kernels[0] if sysrescue_kernels else "/sysrescue/boot/x86_64/vmlinuz"
+                initrd_path = sysrescue_initrds[0] if sysrescue_initrds else "/sysrescue/boot/x86_64/sysrescue.img"
+
+        # 3. ArchISO (Arch Linux / Manjaro / EndeavourOS)
         if not recipe:
             arch_kernels = [f for f in files_list if "vmlinuz-linux" in f or f.startswith("/arch/boot/")]
             arch_initrds = [f for f in files_list if "initramfs" in f and "arch" in f]
@@ -210,7 +245,59 @@ class ISOInspector:
                 kernel_path = arch_kernels[0] if arch_kernels else "/arch/boot/x86_64/vmlinuz-linux"
                 initrd_path = arch_initrds[0] if arch_initrds else "/arch/boot/x86_64/initramfs-linux.img"
 
-        # 3. Dracut (Fedora / RHEL / CentOS)
+        # 4. openSUSE (Kiwi / Dracut Live)
+        if not recipe:
+            suse_kernels = [f for f in files_list if f.startswith("/boot/x86_64/loader/linux")]
+            suse_initrds = [f for f in files_list if f.startswith("/boot/x86_64/loader/initrd")]
+            if suse_kernels and suse_initrds:
+                recipe = "opensuse"
+                confidence = "high"
+                kernel_path = suse_kernels[0]
+                initrd_path = suse_initrds[0]
+            elif "/boot/x86_64/loader" in dirs_list or any(d.startswith("/boot/x86_64") for d in dirs_list):
+                recipe = "opensuse"
+                confidence = "medium"
+                kernel_path = suse_kernels[0] if suse_kernels else "/boot/x86_64/loader/linux"
+                initrd_path = suse_initrds[0] if suse_initrds else "/boot/x86_64/loader/initrd"
+
+        # 5. MX Linux / antiX
+        if not recipe:
+            antix_kernels = [f for f in files_list if f.startswith("/antix/vmlinuz")]
+            antix_initrds = [f for f in files_list if f.startswith("/antix/initrd")]
+            if antix_kernels and antix_initrds:
+                recipe = "mx_linux"
+                confidence = "high"
+                kernel_path = antix_kernels[0]
+                initrd_path = antix_initrds[0]
+            elif any(d.startswith("/antix") for d in dirs_list):
+                recipe = "mx_linux"
+                confidence = "medium"
+                kernel_path = antix_kernels[0] if antix_kernels else "/antiX/vmlinuz"
+                initrd_path = antix_initrds[0] if antix_initrds else "/antiX/initrd.gz"
+
+        # 6. Alpine Linux
+        if not recipe:
+            alpine_modloops = [f for f in files_list if "modloop" in f]
+            alpine_kernels = [
+                f for f in files_list
+                if f.startswith("/boot/vmlinuz") or f.startswith("/boot/vmlinuz_") or "vmlinuz-virt" in f or "vmlinuz-lts" in f
+            ]
+            alpine_initrds = [
+                f for f in files_list
+                if f.startswith("/boot/initramfs") or f.startswith("/boot/initramfs_") or "initramfs-virt" in f or "initramfs-lts" in f
+            ]
+            if (alpine_modloops or "/apks" in dirs_list) and alpine_kernels and alpine_initrds:
+                recipe = "alpine"
+                confidence = "high"
+                kernel_path = alpine_kernels[0]
+                initrd_path = alpine_initrds[0]
+            elif "/apks" in dirs_list or (alpine_kernels and alpine_modloops):
+                recipe = "alpine"
+                confidence = "medium"
+                kernel_path = alpine_kernels[0] if alpine_kernels else "/boot/vmlinuz-virt"
+                initrd_path = alpine_initrds[0] if alpine_initrds else "/boot/initramfs-virt"
+
+        # 7. Dracut (Fedora / RHEL / CentOS / Rocky / Alma)
         if not recipe:
             dracut_kernels = [f for f in files_list if f.startswith("/images/pxeboot/vmlinuz")]
             dracut_initrds = [f for f in files_list if f.startswith("/images/pxeboot/initrd")]
@@ -225,7 +312,7 @@ class ISOInspector:
                 kernel_path = dracut_kernels[0] if dracut_kernels else "/images/pxeboot/vmlinuz"
                 initrd_path = dracut_initrds[0] if dracut_initrds else "/images/pxeboot/initrd.img"
 
-        # 4. Debian Live-Boot (Debian Live / Clonezilla / Kali)
+        # 8. Debian Live-Boot (Debian Live / Clonezilla / Kali / Rescuezilla)
         if not recipe:
             live_kernels = [f for f in files_list if f.startswith("/live/vmlinuz")]
             live_initrds = [f for f in files_list if f.startswith("/live/initrd")]
@@ -240,7 +327,7 @@ class ISOInspector:
                 kernel_path = live_kernels[0] if live_kernels else "/live/vmlinuz"
                 initrd_path = live_initrds[0] if live_initrds else "/live/initrd.img"
 
-        # 5. Generic Linux / Netboot / Alpine Fallback
+        # 9. Generic Linux / Netboot Fallback
         if not recipe:
             generic_kernels = [
                 f for f in files_list
@@ -262,25 +349,49 @@ class ISOInspector:
             else:
                 # Check volume label hints
                 combined_hints = f"{vol_id or ''} {sys_id or ''} {self.iso_path.name}".lower()
-                if "ubuntu" in combined_hints or "mint" in combined_hints:
+                if "ubuntu" in combined_hints or "mint" in combined_hints or "zorin" in combined_hints or "pop" in combined_hints:
                     recipe = "casper"
                     confidence = "medium"
                     kernel_path = "/casper/vmlinuz"
                     initrd_path = "/casper/initrd"
                     warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
-                elif "arch" in combined_hints or "manjaro" in combined_hints:
+                elif "systemrescue" in combined_hints or "sysrescue" in combined_hints:
+                    recipe = "systemrescue"
+                    confidence = "medium"
+                    kernel_path = "/sysrescue/boot/x86_64/vmlinuz"
+                    initrd_path = "/sysrescue/boot/x86_64/sysrescue.img"
+                    warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
+                elif "arch" in combined_hints or "manjaro" in combined_hints or "endeavour" in combined_hints:
                     recipe = "archiso"
                     confidence = "medium"
                     kernel_path = "/arch/boot/x86_64/vmlinuz-linux"
                     initrd_path = "/arch/boot/x86_64/initramfs-linux.img"
                     warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
-                elif "fedora" in combined_hints or "rhel" in combined_hints:
+                elif "opensuse" in combined_hints or "suse" in combined_hints or "tumbleweed" in combined_hints or "leap" in combined_hints:
+                    recipe = "opensuse"
+                    confidence = "medium"
+                    kernel_path = "/boot/x86_64/loader/linux"
+                    initrd_path = "/boot/x86_64/loader/initrd"
+                    warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
+                elif "mx" in combined_hints or "antix" in combined_hints:
+                    recipe = "mx_linux"
+                    confidence = "medium"
+                    kernel_path = "/antiX/vmlinuz"
+                    initrd_path = "/antiX/initrd.gz"
+                    warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
+                elif "alpine" in combined_hints:
+                    recipe = "alpine"
+                    confidence = "medium"
+                    kernel_path = "/boot/vmlinuz-virt"
+                    initrd_path = "/boot/initramfs-virt"
+                    warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
+                elif "fedora" in combined_hints or "rhel" in combined_hints or "rocky" in combined_hints or "alma" in combined_hints:
                     recipe = "dracut"
                     confidence = "medium"
                     kernel_path = "/images/pxeboot/vmlinuz"
                     initrd_path = "/images/pxeboot/initrd.img"
                     warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
-                elif "clonezilla" in combined_hints or "debian" in combined_hints:
+                elif "clonezilla" in combined_hints or "debian" in combined_hints or "rescuezilla" in combined_hints or "kali" in combined_hints:
                     recipe = "live_boot"
                     confidence = "medium"
                     kernel_path = "/live/vmlinuz"

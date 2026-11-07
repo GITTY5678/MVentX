@@ -147,6 +147,23 @@ class TestInstallationServiceVirtual(unittest.TestCase):
         self.assertEqual(len(rep.errors), 0)
         self.assertGreaterEqual(rep.passed_count, 10)
 
+    def test_install_to_physical_device_policy_lock(self):
+        """Verify install_to_physical_device raises PermissionError when physical formatting is locked."""
+        phys_usb = DeviceInfo(
+            device_id="\\\\.\\PhysicalDrive1",
+            name="SanDisk Cruzer Blade",
+            size_bytes=63065554944,
+            is_removable=True,
+            is_system_disk=False,
+            device_type=DeviceType.REMOVABLE_USB,
+        )
+        with self.assertRaises(PermissionError) as ctx:
+            self.installer.install_to_physical_device(
+                device=phys_usb,
+                expected_fingerprint="dummy_fingerprint",
+            )
+        self.assertIn("Physical storage device formatting is disabled by policy", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

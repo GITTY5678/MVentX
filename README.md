@@ -150,7 +150,7 @@ python manager\main.py --data build\data --boot build\esp
 
 #### 7. Storage Validation & Windows Interoperability
 ```powershell
-# Run the complete automated test suite (153 tests):
+# Run the complete automated test suite (240 tests):
 python -m unittest discover tests
 
 # Deep sector-level structural validation of GPT, FAT32, and exFAT:
@@ -163,17 +163,48 @@ python -m core.storage.disk_validator build\mventx_test.img --read-exfat config/
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\test_windows_mount.ps1
 ```
 
-#### 8. Automated QEMU Boot Verification Harness (Milestones 6 & 7)
+#### 8. Automated QEMU Boot Verification Harness (Milestones 6, 7 & 12)
 ```powershell
 # Run automated virtual UEFI boot harness across all scenarios and verify GRUB graphics:
 python scripts/test_qemu_harness.py --scenario all
 
-# Run real Linux ISO loopback boot verification in QEMU (Levels 1-4):
+# Run real Linux ISO loopback boot verification in QEMU across distribution families:
 python -m unittest tests/integration/test_linux_loopback_boot.py
+python -m unittest tests/integration/test_multidistro_loopback.py
 
 # Interactive windowed UEFI virtual boot:
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\run_qemu.ps1
 ```
+
+---
+
+## Operating System Compatibility & Verification Levels
+
+MVentX evaluates distribution boot compatibility across six standardized verification levels:
+
+- **L0: Recipe Implemented**: GRUB 2 loopback parameters defined and syntactically validated.
+- **L1: ISO Structure Inspected**: Filesystem inspected with Rock Ridge (`SUSP/RRIP`) Alternate Name parsing; kernel and initramfs discovered.
+- **L2: Kernel Loaded**: Kernel decompressed into memory and execution initiated under UEFI firmware.
+- **L3: Initramfs Initialized**: Initramfs loaded, device discovery performed, and early user-space started.
+- **L4: Installer / Shell Reached**: Text/graphical installer or interactive recovery shell reached.
+- **L5: Full Live Desktop**: Graphical desktop environment (e.g., GNOME, KDE, Cinnamon) fully interactive.
+
+### Supported Distributions Matrix
+
+| Distribution Family | Representative Distributions | Recipe ID | Boot Parameters / Discovery | Verification Level |
+| :--- | :--- | :--- | :--- | :--- |
+| **Casper** | Ubuntu Desktop, Linux Mint, Pop!_OS, Zorin OS, Elementary OS | `casper` | `iso-scan/filename=${iso_path} boot=casper` | **L4 (Installer Reached)** |
+| **Debian Live-Boot** | Debian Live, Clonezilla, Kali Linux, Rescuezilla | `live_boot` | `boot=live findiso=${iso_path} union=overlay` | **L3 (Initramfs Initialized)** |
+| **Alpine Linux** | Alpine Linux Virt, Alpine Standard | `alpine` | `modules=loop,squashfs modloop=/boot/modloop-virt` | **L3 (Initramfs Initialized)** |
+| **ArchISO** | Arch Linux, Manjaro, EndeavourOS | `archiso` | `img_dev=/dev/disk/by-label/MVX_DATA img_loop=${iso_path}` | **L1 (Inspected / L2 Ready)** |
+| **SystemRescue** | SystemRescue (v6.0+) | `systemrescue` | `img_dev=... img_loop=... archisobasedir=sysrescue` | **L1 (ArchISO Architecture)** |
+| **Dracut** | Fedora Workstation, RHEL, CentOS, Rocky Linux, AlmaLinux | `dracut` | `root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path}` | **L1 (Inspected / L2 Ready)** |
+| **openSUSE** | openSUSE Leap, openSUSE Tumbleweed Live | `opensuse` | `root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path}` | **L0 (Recipe Implemented)** |
+| **MX Linux** | MX Linux, antiX Live | `mx_linux` | `fromiso=${iso_path} bootdev=MVX_DATA` | **L0 (Recipe Implemented)** |
+| **Windows Installer** | Windows 10/11 x64 Installation Media | `windows_extracted` | Direct UEFI Chainloading (`bootmgfw.efi`) | **PAUSED (Experimental / Unsupported)** |
+
+> [!NOTE]
+> **Windows Installation ISO Boot Decision**: In accordance with Project Decision 2.1, Windows installation ISO booting is **paused** and classified as experimental/unsupported. Because Microsoft Windows Boot Manager lacks an embedded exFAT driver and delegates I/O to UEFI firmware (`0xc00000bb` / `STATUS_NOT_SUPPORTED`), Windows installation media is not advertised as a supported production feature. Standard chainloading of existing Windows EFI installations remains functional.
 
 ---
 
@@ -213,6 +244,14 @@ bash scripts/run_qemu.sh
 - [Milestone 7: Linux ISO Loopback Boot Report](docs/milestone-7-linux-boot.md)
 - [Milestone 8: Linux Compatibility Report](docs/milestone-8-linux-compatibility.md)
 - [Milestone 9: USB Installation and Preparation Report](docs/milestone-9-usb-installation.md)
+- [Milestone 10: Cross-Platform Host Integration Report](docs/milestone-10-host-integration.md)
+- [Milestone 11: Windows Boot Compatibility Report](docs/milestone-11-windows-boot.md)
+- [Milestone 11: Windows Verification Report](docs/milestone-11-verification.md)
+- [Milestone 12: Linux Distribution Compatibility Report](docs/milestone-12-linux-compatibility.md)
+- [Milestone 13: Physical USB Validation Report](docs/milestone-13-physical-usb-validation.md)
+- [Milestone 14: Desktop Manager Maturity Report](docs/milestone-14-desktop-manager.md)
+- [Milestone 15: Recovery and Diagnostics Report](docs/milestone-15-recovery-diagnostics.md)
+- [Milestone 16: Cross-Platform Host Validation Report](docs/milestone-16-cross-platform-validation.md)
 - [Technical Decisions & Rationale](docs/technical-decisions.md)
 - [QEMU Virtual Boot Testing Guide](tests/boot/README.md)
 

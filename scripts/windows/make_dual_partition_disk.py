@@ -539,68 +539,51 @@ class ExFATBuilder:
         struct.pack_into("<H", entries, 2, c)
         return bytes(entries)
 
+    def _write_directory_tree(self, dir_path: Path) -> Tuple[int, int]:
+        """Recursively allocate and write a directory tree to exFAT buffer.
+
+        Returns:
+            Tuple of (first_cluster, total_directory_size_bytes)
+        """
+        dir_cluster = self.allocated_clusters
+        self.allocated_clusters += 1
+
+        dir_entries = bytearray()
+
+        items = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        for item in items:
+            if item.is_dir():
+                sub_cluster, sub_size = self._write_directory_tree(item)
+                dir_entries.extend(
+                    self.make_entry_set(item.name, is_dir=True, first_cluster=sub_cluster, size=sub_size)
+                )
+            elif item.is_file():
+                file_bytes = item.read_bytes()
+                fc, _ = self.allocate_file(file_bytes)
+                dir_entries.extend(
+                    self.make_entry_set(item.name, is_dir=False, first_cluster=fc, size=len(file_bytes))
+                )
+
+        clusters_needed = max(1, math.ceil(len(dir_entries) / self.cluster_size))
+        dir_offset = (
+            self.cluster_heap_offset + (dir_cluster - 2) * self.sectors_per_cluster
+        ) * self.bytes_per_sector
+        self.fs_buffer[dir_offset : dir_offset + len(dir_entries)] = dir_entries
+
+        return dir_cluster, self.cluster_size * clusters_needed
+
     def build_with_structure(
         self,
         default_config: Dict[str, Any],
         data_source_dir: Optional[Path] = None,
     ) -> bytes:
-        """Build compliant exFAT filesystem containing ISO/, config/, metadata/, backups/."""
+        """Build compliant exFAT filesystem containing ISO/, config/, metadata/, backups/, and any extra source folders."""
         # Write Up-case Table in clusters 3..34
-        upcase_offset = (self.cluster_heap_offset + (self.upcase_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
+        upcase_offset = (
+            self.cluster_heap_offset + (self.upcase_cluster - 2) * self.sectors_per_cluster
+        ) * self.bytes_per_sector
         self.fs_buffer[upcase_offset : upcase_offset + len(self.upcase_data)] = self.upcase_data
 
-        # 1. Prepare subdirectories
-        # ISO/ directory
-        iso_cluster = self.allocated_clusters
-        self.allocated_clusters += 1
-
-        # metadata/ directory
-        meta_cluster = self.allocated_clusters
-        self.allocated_clusters += 1
-
-        # backups/ directory
-        backups_cluster = self.allocated_clusters
-        self.allocated_clusters += 1
-
-        # config/ directory containing mventx.json
-        config_cluster = self.allocated_clusters
-        self.allocated_clusters += 1
-
-        # Write config/mventx.json
-        config_json_bytes = json.dumps(default_config, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
-        json_cluster, _ = self.allocate_file(config_json_bytes)
-
-        # Populate config/ directory entries
-        config_dir_entries = bytearray()
-        config_dir_entries.extend(self.make_entry_set("mventx.json", is_dir=False, first_cluster=json_cluster, size=len(config_json_bytes)))
-        cfg_offset = (self.cluster_heap_offset + (config_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
-        self.fs_buffer[cfg_offset : cfg_offset + len(config_dir_entries)] = config_dir_entries
-
-        # Populate ISO/ directory entries if any exist
-        iso_dir_entries = bytearray()
-        if data_source_dir and (data_source_dir / "ISO").is_dir():
-            for item in sorted((data_source_dir / "ISO").iterdir()):
-                if item.is_file():
-                    file_bytes = item.read_bytes()
-                    fc, _ = self.allocate_file(file_bytes)
-                    iso_dir_entries.extend(self.make_entry_set(item.name, is_dir=False, first_cluster=fc, size=len(file_bytes)))
-        if iso_dir_entries:
-            iso_offset = (self.cluster_heap_offset + (iso_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
-            self.fs_buffer[iso_offset : iso_offset + len(iso_dir_entries)] = iso_dir_entries
-
-        # Populate metadata/ directory entries if any exist
-        meta_dir_entries = bytearray()
-        if data_source_dir and (data_source_dir / "metadata").is_dir():
-            for item in sorted((data_source_dir / "metadata").iterdir()):
-                if item.is_file():
-                    file_bytes = item.read_bytes()
-                    fc, _ = self.allocate_file(file_bytes)
-                    meta_dir_entries.extend(self.make_entry_set(item.name, is_dir=False, first_cluster=fc, size=len(file_bytes)))
-        if meta_dir_entries:
-            meta_offset = (self.cluster_heap_offset + (meta_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
-            self.fs_buffer[meta_offset : meta_offset + len(meta_dir_entries)] = meta_dir_entries
-
-        # 2. Build Root Directory entries
         root_entries = bytearray()
 
         # Volume Label Directory Entry (0x83)
@@ -627,26 +610,62 @@ class ExFATBuilder:
         struct.pack_into("<Q", upcase_entry, 24, len(self.upcase_data))
         root_entries.extend(upcase_entry)
 
-        # Subdirectory sets in Root Directory
-        root_entries.extend(self.make_entry_set("ISO", is_dir=True, first_cluster=iso_cluster, size=self.cluster_size))
-        root_entries.extend(self.make_entry_set("config", is_dir=True, first_cluster=config_cluster, size=self.cluster_size))
-        root_entries.extend(self.make_entry_set("metadata", is_dir=True, first_cluster=meta_cluster, size=self.cluster_size))
-        root_entries.extend(self.make_entry_set("backups", is_dir=True, first_cluster=backups_cluster, size=self.cluster_size))
+        # Process directories from data_source_dir if provided
+        seen_root_names = set()
+        if data_source_dir and data_source_dir.is_dir():
+            for item in sorted(data_source_dir.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
+                seen_root_names.add(item.name.lower())
+                if item.is_dir():
+                    cluster, size = self._write_directory_tree(item)
+                    root_entries.extend(
+                        self.make_entry_set(item.name, is_dir=True, first_cluster=cluster, size=size)
+                    )
+                elif item.is_file():
+                    file_bytes = item.read_bytes()
+                    fc, _ = self.allocate_file(file_bytes)
+                    root_entries.extend(
+                        self.make_entry_set(item.name, is_dir=False, first_cluster=fc, size=len(file_bytes))
+                    )
+
+        # Ensure baseline required MVentX folders exist even if empty
+        for req_folder in ("ISO", "config", "metadata", "backups"):
+            if req_folder.lower() not in seen_root_names:
+                dir_cluster = self.allocated_clusters
+                self.allocated_clusters += 1
+                if req_folder == "config":
+                    # Write default config
+                    config_json_bytes = json.dumps(default_config, indent=2, ensure_ascii=False).encode("utf-8") + b"\n"
+                    json_cluster, _ = self.allocate_file(config_json_bytes)
+                    config_dir_entries = bytearray()
+                    config_dir_entries.extend(
+                        self.make_entry_set("mventx.json", is_dir=False, first_cluster=json_cluster, size=len(config_json_bytes))
+                    )
+                    cfg_offset = (
+                        self.cluster_heap_offset + (dir_cluster - 2) * self.sectors_per_cluster
+                    ) * self.bytes_per_sector
+                    self.fs_buffer[cfg_offset : cfg_offset + len(config_dir_entries)] = config_dir_entries
+
+                root_entries.extend(
+                    self.make_entry_set(req_folder, is_dir=True, first_cluster=dir_cluster, size=self.cluster_size)
+                )
 
         # Write Root Directory to cluster 35
-        root_offset = (self.cluster_heap_offset + (self.root_dir_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
+        root_offset = (
+            self.cluster_heap_offset + (self.root_dir_cluster - 2) * self.sectors_per_cluster
+        ) * self.bytes_per_sector
         self.fs_buffer[root_offset : root_offset + len(root_entries)] = root_entries
 
-        # 3. Build and write Allocation Bitmap in Cluster 2
+        # Build and write Allocation Bitmap in Cluster 2
         bitmap = bytearray(bitmap_bytes_len)
-        # Mark clusters 2 through self.allocated_clusters - 1 as allocated
         for clus in range(2, self.allocated_clusters):
             idx = (clus - 2) // 8
             bit = (clus - 2) % 8
             if idx < len(bitmap):
                 bitmap[idx] |= (1 << bit)
 
-        bitmap_offset = (self.cluster_heap_offset + (self.bitmap_cluster - 2) * self.sectors_per_cluster) * self.bytes_per_sector
+        bitmap_offset = (
+            self.cluster_heap_offset + (self.bitmap_cluster - 2) * self.sectors_per_cluster
+        ) * self.bytes_per_sector
         self.fs_buffer[bitmap_offset : bitmap_offset + len(bitmap)] = bitmap
 
         return bytes(self.fs_buffer)

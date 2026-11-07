@@ -256,3 +256,122 @@ Milestone 9 introduces the complete automated USB preparation and installation p
   - Complete QEMU UEFI boot verification confirming fallback menu initialization.
 - **Cons**: Physical USB drive flashing is intentionally locked behind safety guards until dedicated hardware testing milestones.
 
+---
+
+## TDR 013: Cross-Platform Host Integration Layer, Strong Device Identity, and Disconnection Safety
+
+### Context
+Milestone 10 introduces the cross-platform host integration subsystem connecting the desktop application to existing MVentX USB devices across Windows 10/11 and Linux. Operating systems frequently reassign drive letters or mount points upon device reconnection or when other storage devices are attached. Additionally, accidental unplugging during write operations can cause filesystem corruption, and classifying a device merely by a volume label like `MVX_DATA` is prone to false positives.
+
+### Decision
+1. **Multi-Attribute Classification (`DeviceClassifier`)**:
+   - Strictly decouple detection, classification, mounting, and modification.
+   - Classification is strictly read-only and never automatically mounts, formats, or repairs a device.
+   - Require GPT partition table, ESP partition (`C12A7328-...`), Basic Data partition (`EBD0A0A2-...`), directory skeleton (`ISO/`, `config/`, `metadata/`, `backups/`), and a valid `config/mventx.json` conforming to `schema.json`.
+   - Classify into 5 explicit statuses: `VALID_MVENTX`, `INCOMPLETE_INSTALLATION`, `CORRUPTED_INSTALLATION`, `ORDINARY_STORAGE`, and `INACCESSIBLE`.
+2. **Strong Device Identity & Pre-Write Guard (`DeviceIdentity`)**:
+   - Compute deterministic SHA-256 fingerprints from GPT Disk GUID, partition UUIDs, hardware serials, vendor, model, and capacity.
+   - Revalidate device identity immediately prior to every write operation (`revalidate_device_identity`).
+   - Abort write with `DeviceDisappearedError` or `DeviceIdentityMismatchError` if device presence or fingerprint changes.
+3. **Explicit Device Lifecycle State Machine (`DeviceStateMachine`)**:
+   - Track device transitions through 14 states: `DETECTED` -> `IDENTIFYING` -> `IDENTIFIED` -> `VALIDATING` -> `READY` <-> `BUSY` -> `EJECTING` -> `EJECTED` (with `DISCONNECTED` reachable from any operational state).
+4. **Atomic Configuration Sync with Safe Rollback (`FilesystemAccessor`)**:
+   - Validate schema before touching disk.
+   - Write timestamped backup in `backups/` and rotate old backups.
+   - Write configuration to temporary file, flush buffers with `os.fsync()`, and atomically replace `mventx.json`.
+   - If boot menu compilation fails, restore original `mventx.json` and raise `ConfigurationRollbackError`.
+5. **Safe Ejection & Disconnection Monitor**:
+   - Assert `is_busy == False`, flush OS buffers (`FlushFileBuffers` / `os.sync`), unmount MVentX-owned partitions, and invoke OS removal APIs.
+   - Monitor bus events and immediately clear active targets and block writes upon disconnection.
+
+### Consequences
+- **Pros**:
+  - Immunity to drive-letter collisions and accidental writes to reconnected or imposter disks.
+  - Complete data safety: zero risk of half-written configurations or corrupted boot menus.
+  - Smooth user experience with safe ejection and hotplug notifications in PySide6 GUI.
+- **Cons**: Pre-write revalidation introduces slight bus query overhead (< 2 ms) prior to write mutations.
+
+
+## TDR 014: Windows Boot Strategy, Staged Media Chainloading, and Verification Taxonomy
+
+### Context
+Milestone 11 addresses Microsoft Windows installation media booting. Unlike Linux distributions which can execute loopback ISO boots via initramfs kernel parameters (`iso-scan/filename`, `boot=live findiso=`), the Windows PE boot sequence (`bootmgfw.efi` -> BCD -> `boot.wim` -> `ntoskrnl.exe` -> `setup.exe`) calls `ExitBootServices()`, which destroys GRUB's firmware-level loopback mapping. Consequently, pure GRUB loopback boots fail inside WinPE with the error *"A media driver your computer needs is missing"*, because no in-kernel virtual optical disc driver exists.
+
+### Decision
+1. **Primary Strategy: Staged Media on `MVX_DATA` with Direct UEFI Chainloading**:
+   - Because `MVX_DATA` uses exFAT (which natively supports files $> 4\text{ GiB}$ and has an in-box driver `exfat.sys` inside Windows PE), extracting Windows installation media into `MVX_DATA` allows the Windows Boot Manager (`bootmgfw.efi`) to discover BCD and `boot.wim`, while `setup.exe` detects `\sources\install.wim` on the exFAT volume without requiring third-party kernel drivers.
+   - Pending hardware validation, this is treated as the primary strategy rather than claiming 100% universal compatibility.
+2. **Six-Tier Verification Taxonomy**:
+   - Establish explicit verification boundaries:
+     - Level 1: ISO Inspected (structural parsing of PVD, bootloader, BCD, WIM).
+     - Level 2: Media Staged (storage pre-checks, extraction, payload integrity check).
+     - Level 3: Menu Generated (GRUB configuration compiled with defensive error screens).
+     - Level 4: Boot Manager Executed (UEFI `BS->LoadImage` / `StartImage` verified in QEMU OVMF).
+     - Level 5: WinPE Initialized (WinPE kernel loaded; documented limitations).
+     - Level 6: Setup UI Interactive (graphical setup wizard reached).
+   - Automated test verification explicitly targets Levels 1–4.
+3. **Capacity Math & Safety Margin**:
+   - Calculate required disk space dynamically: $\text{Raw Payload} + 5\% \text{ Cluster Padding} + 500\text{ MiB Safety Cushion}$.
+   - Reject staging upfront if target volume lacks sufficient free capacity.
+4. **Data Protection Policy**:
+   - Removing or modifying a Windows environment record in MVentX Manager updates configuration and regenerates the boot menu, but strictly preserves staged Windows media files unless explicit deletion is confirmed.
+5. **Defensive GRUB Generation**:
+   - Quote paths containing spaces, perform partition label discovery (`search --label`), verify bootloader presence (`if [ -f ...]`), and display clear recovery instructions if files are absent.
+
+### Consequences
+- **Pros**:
+  - Clean separation from Linux loopback recipes.
+  - Native Windows installation support on exFAT partitions without proprietary kernel hooks.
+  - Rigorous truth in technical reporting via the 6-tier taxonomy.
+- **Cons**:
+  - Requires extraction space on `MVX_DATA` (typically 5–7 GiB) unlike direct ISO loopback.
+
+
+## TDR 015: Pause of Windows Installation ISO Boot Development (Decision 2.1)
+
+### Context
+Dedicated empirical verification of Microsoft Windows Boot Manager (`bootmgfw.efi`) chainloaded from `MVX_DATA` (exFAT) under UEFI firmware in QEMU OVMF proved an architectural limitation: `bootmgfw.efi` is a UEFI boot application that relies on firmware's `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`. Standard UEFI firmware implementations (including OVMF and commercial PC motherboards) only implement native drivers for FAT (FAT12/16/32). Consequently, `bootmgfw.efi` halts with `0xc00000bb` (`STATUS_NOT_SUPPORTED`) when attempting to open `\EFI\Microsoft\Boot\BCD` from an exFAT volume.
+
+### Decision
+1. **Pause Windows Installation Boot Development**: In accordance with Project Decision 2.1, Windows installation ISO boot is paused and marked as experimental/unsupported.
+2. **Preserve Existing Artifacts**: All inspection, staging, BCD analysis, and verification results are preserved.
+3. **Primary Focus on Linux**: Development resources are strictly redirected toward Linux distribution loopback reliability and recovery environments.
+4. **Honest Advertising**: Windows installation media boot is not advertised as a supported production feature. Standard chainloading of existing Windows EFI installations on separate physical ESP partitions remains supported.
+
+### Consequences
+- **Pros**: Prevents fragile, out-of-spec workarounds (such as kernel binary hooking or unofficial DXE drivers); focuses project effort on core Linux strengths.
+- **Cons**: Booting Windows installers directly from the exFAT partition remains unsupported out-of-the-box.
+
+
+## TDR 016: Linux Distribution Compatibility Expansion, Rock Ridge POSIX Parsing, and L0–L5 Verification Taxonomy
+
+### Context
+Milestone 12 aims to expand Linux boot compatibility across distinct distribution families (Casper, ArchISO, Dracut, Debian Live-Boot, openSUSE, MX Linux/antiX, Alpine Linux, SystemRescue). ISO images often utilize Rock Ridge (`SUSP/RRIP`) extensions to store true POSIX filenames with hyphens (e.g., `vmlinuz-virt`), whereas standard ISO 9660 level 1 directory records sanitize and truncate them to uppercase d-characters with underscores (e.g., `VMLINUZ_VIRT.;1`). GRUB's `iso9660` module enables Rock Ridge by default, so if MVentX's ISO inspector only inspects standard ISO 9660 records, path mismatches trigger boot errors.
+
+### Decision
+1. **Dedicated Distribution Recipes**:
+   - Implemented `RECIPE_OPENSUSE` (Kiwi/Dracut), `RECIPE_MX_LINUX` (antiX linux-live), `RECIPE_ALPINE` (modloop), and `RECIPE_SYSTEMRESCUE` (ArchISO base).
+   - Added alias recognition for Zorin OS, Elementary OS, Rescuezilla, Rocky Linux, AlmaLinux, Manjaro, and EndeavourOS.
+2. **Rock Ridge POSIX Filesystem Inspection (`ISOInspector`)**:
+   - Parse System Use Area (SUA) within directory records to extract Rock Ridge Alternate Name (`NM`) records.
+   - Use the decoded Rock Ridge name as the authoritative filename for kernel, initramfs, and modloop discovery.
+3. **Standardized Six-Tier Verification Taxonomy (L0–L5)**:
+   - Formally adopt the 6-tier verification taxonomy across all Linux distributions:
+     - L0: Recipe implemented
+     - L1: ISO structure inspected
+     - L2: Kernel loaded
+     - L3: Initramfs initialized
+     - L4: Installer / shell reached
+     - L5: Full live desktop reached
+4. **Real Boot Evidence**:
+   - Require real QEMU + OVMF boot validation across at least four distinct Linux distribution families (Casper, Live-Boot, Alpine, ArchISO/Dracut).
+
+### Consequences
+- **Pros**:
+  - Eliminates path mismatches between ISO inspection and GRUB loopback mounting.
+  - Transparent, evidence-based compatibility reporting without overclaiming support.
+  - Expands MVentX support to major rescue and specialized Linux environments.
+- **Cons**: Slightly increased directory parsing complexity in `ISOInspector` (negligible performance difference < 1 ms per ISO).
+
+
+

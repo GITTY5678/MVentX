@@ -22,6 +22,20 @@ from core.iso_manager.validation import (
     ISOValidationResult,
     ISOValidator,
 )
+from core.iso_manager.windows_iso_inspector import (
+    WindowsArchitecture,
+    WindowsInspectionResult,
+    WindowsISOInspector,
+    WindowsPayloadType,
+)
+from core.iso_manager.windows_media_manager import (
+    ExtractionIntegrityError,
+    ExtractionInterruptedError,
+    InsufficientStorageError,
+    StorageRequirement,
+    WindowsMediaManager,
+    WindowsStorageError,
+)
 
 __all__: List[str] = [
     "DuplicateRegistrationError",
@@ -37,4 +51,14 @@ __all__: List[str] = [
     "PathTraversalError",
     "RegistrationError",
     "StorageMetrics",
+    "WindowsArchitecture",
+    "WindowsInspectionResult",
+    "WindowsISOInspector",
+    "WindowsPayloadType",
+    "WindowsMediaManager",
+    "StorageRequirement",
+    "WindowsStorageError",
+    "InsufficientStorageError",
+    "ExtractionInterruptedError",
+    "ExtractionIntegrityError",
 ]

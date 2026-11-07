@@ -179,6 +179,10 @@ class TestMultiDistroLoopbackIntegration(unittest.TestCase):
             display_name="Alpine Linux Virt",
         )
 
+        self.assertEqual(record.recipe, "alpine")
+        self.assertEqual(record.kernel_path, "/boot/vmlinuz-virt")
+        self.assertEqual(record.initrd_path, "/boot/initramfs-virt")
+
         menu_path = self.boot_mount / "boot" / "grub" / "mventx_menu.cfg"
         self.assertTrue(menu_path.is_file())
         menu_content = menu_path.read_text(encoding="utf-8")
@@ -186,6 +190,7 @@ class TestMultiDistroLoopbackIntegration(unittest.TestCase):
         self.assertIn("Alpine Linux Virt", menu_content)
         self.assertIn("loopback loop0", menu_content)
         self.assertIn(record.kernel_path, menu_content)
+        self.assertIn(record.initrd_path, menu_content)
 
 
 if __name__ == "__main__":

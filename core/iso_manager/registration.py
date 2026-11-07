@@ -80,6 +80,8 @@ class EnvironmentRecord:
     checksum: Optional[Dict[str, str]] = None
     file_size_bytes: Optional[int] = None
     registered_at: Optional[str] = None
+    staged_subfolder: Optional[str] = None
+    bootloader_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary matching schema.json definitions."""
@@ -109,6 +111,10 @@ class EnvironmentRecord:
             data["target_hint"] = self.target_hint
         if self.checksum is not None:
             data["checksum"] = self.checksum
+        if self.staged_subfolder is not None:
+            data["staged_subfolder"] = self.staged_subfolder
+        if self.bootloader_path is not None:
+            data["bootloader_path"] = self.bootloader_path
         return data
 
     @classmethod
@@ -129,6 +135,8 @@ class EnvironmentRecord:
             target_path=data.get("target_path"),
             target_hint=data.get("target_hint"),
             checksum=data.get("checksum"),
+            staged_subfolder=data.get("staged_subfolder"),
+            bootloader_path=data.get("bootloader_path"),
         )
 
 
@@ -430,6 +438,59 @@ class ISORegistrationManager:
 
         # 9. Save and sync with automatic rollback on failure
         self._save_and_sync_with_rollback(config, metadata_to_cleanup_on_error=env_id)
+
+        return record
+
+    def register_windows_media(
+        self,
+        display_name: str,
+        bootloader_path: str = "/efi/boot/bootx64.efi",
+        staged_subfolder: Optional[str] = None,
+        iso_path: Optional[Union[Path, str]] = None,
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> EnvironmentRecord:
+        """Register a Windows installation media environment."""
+        display_name = display_name.strip()
+        if not display_name:
+            raise ValueError("display_name cannot be empty.")
+
+        config = self._load_config()
+        environments = config.get("environments", [])
+
+        existing_ids = {e.get("id") for e in environments if isinstance(e, dict)}
+        env_id = self._generate_unique_id(display_name, existing_ids)
+        order = len(environments) + 1
+
+        rel_iso_path = None
+        if iso_path:
+            p = Path(iso_path)
+            if p.is_absolute():
+                try:
+                    rel_iso_path = p.relative_to(self.storage_manager.data_mount).as_posix()
+                except ValueError:
+                    rel_iso_path = p.name
+            else:
+                rel_iso_path = p.as_posix()
+            if not rel_iso_path.startswith("/"):
+                rel_iso_path = f"/{rel_iso_path}"
+
+        record = EnvironmentRecord(
+            id=env_id,
+            display_name=display_name,
+            type="windows",
+            boot_method="windows_extracted_media",
+            enabled=enabled,
+            order=order,
+            iso_path=rel_iso_path,
+            description=description,
+            staged_subfolder=staged_subfolder,
+            bootloader_path=bootloader_path,
+        )
+
+        environments.append(record.to_dict())
+        config["environments"] = environments
+        self._save_and_sync_with_rollback(config)
 
         return record
 

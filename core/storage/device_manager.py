@@ -44,16 +44,29 @@ class DeviceManager:
             return self._list_devices_generic()
 
     def _list_devices_windows(self) -> List[DeviceInfo]:
-        """Enumerate Windows disks using PowerShell / WMI query."""
+        """Enumerate Windows disks using WindowsDeviceProvider with fallback."""
+        try:
+            from core.host.windows.windows_device_provider import WindowsDeviceProvider
+            provider = WindowsDeviceProvider()
+            devices = provider.enumerate_devices()
+            if devices:
+                return devices
+        except Exception:
+            pass
+
+        return self._list_devices_windows_fallback()
+
+    def _list_devices_windows_fallback(self) -> List[DeviceInfo]:
+        """Fallback Windows disk enumeration using direct PowerShell query."""
         devices: List[DeviceInfo] = []
 
         # Find system drive letter (usually "C:")
         sys_drive = os.environ.get("SystemDrive", "C:").upper().rstrip("\\")
 
         ps_script = (
-            "Get-Disk | Select-Object Number, FriendlyName, BusType, OperationalStatus, "
-            "Size, LogicalSectorSize, PartitionStyle, IsBoot, IsSystem, IsReadOnly | "
-            "ConvertTo-Json -Compress"
+            "Get-Disk | Select-Object Number, FriendlyName, Manufacturer, Model, SerialNumber, "
+            "BusType, OperationalStatus, Size, LogicalSectorSize, PartitionStyle, "
+            "IsBoot, IsSystem, IsReadOnly | ConvertTo-Json -Compress"
         )
         try:
             res = subprocess.run(
@@ -69,11 +82,21 @@ class DeviceManager:
                 for d in disk_list:
                     disk_num = d.get("Number", 0)
                     device_id = f"\\\\.\\PHYSICALDRIVE{disk_num}"
-                    friendly_name = d.get("FriendlyName", f"Disk {disk_num}")
+                    friendly_name = str(d.get("FriendlyName") or f"Disk {disk_num}").strip()
+                    model = str(d.get("Model") or friendly_name).strip()
+                    vendor = str(d.get("Manufacturer") or "").strip()
+                    from core.host.windows.windows_device_provider import normalize_serial_number
+                    serial = normalize_serial_number(d.get("SerialNumber"))
                     bus_type = str(d.get("BusType", "")).upper()
                     size = int(d.get("Size") or 0)
                     sector_size = int(d.get("LogicalSectorSize") or 512)
                     part_style = str(d.get("PartitionStyle", "")).lower()
+
+                    if not vendor and " " in friendly_name:
+                        parts = friendly_name.split(" ", 1)
+                        vendor = parts[0].strip()
+                        if model == friendly_name:
+                            model = parts[1].strip()
 
                     is_boot = bool(d.get("IsBoot", False))
                     is_system = bool(d.get("IsSystem", False))
@@ -92,8 +115,9 @@ class DeviceManager:
                         DeviceInfo(
                             device_id=device_id,
                             name=friendly_name,
-                            vendor="",
-                            model=friendly_name,
+                            vendor=vendor,
+                            model=model,
+                            serial_number=serial,
                             size_bytes=size,
                             sector_size=sector_size,
                             device_type=dev_type,
@@ -346,8 +370,12 @@ class DeviceManager:
     # Strict Safety Controls
     # --------------------------------------------------------------------------
 
-    def validate_target_safety(self, device: DeviceInfo) -> Tuple[bool, List[str]]:
-        """Evaluate whether a storage device is safe to target for installation.
+    def validate_target_safety(self, device: DeviceInfo, for_installation: bool = True) -> Tuple[bool, List[str]]:
+        """Evaluate whether a storage device is safe to target for installation or management.
+
+        Args:
+            device: Storage device model to evaluate.
+            for_installation: If True, enforces physical formatting lockdown.
 
         Returns:
             Tuple of (is_safe: bool, rejection_reasons: List[str])
@@ -380,8 +408,8 @@ class DeviceManager:
                 f"REJECTED: Device '{device.name}' reports 0 bytes capacity or is disconnected."
             )
 
-        # 5. Physical Formatting Safety Guard
-        if not device.is_virtual and not self.allow_physical_formatting:
+        # 5. Physical Formatting Safety Guard (Installation only)
+        if for_installation and not device.is_virtual and not self.allow_physical_formatting:
             reasons.append(
                 "BLOCKED: Physical device formatting is currently disabled by safety policy. "
                 "Virtual disk target mode (.img / .vhd) must be used."
@@ -390,9 +418,9 @@ class DeviceManager:
         is_safe = (len(reasons) == 0)
         return is_safe, reasons
 
-    def assert_safe_target(self, device: DeviceInfo) -> None:
+    def assert_safe_target(self, device: DeviceInfo, for_installation: bool = True) -> None:
         """Enforce safety rules and raise DeviceSafetyError if unsafe."""
-        is_safe, reasons = self.validate_target_safety(device)
+        is_safe, reasons = self.validate_target_safety(device, for_installation=for_installation)
         if not is_safe:
             msg = "Target device safety verification failed:\n- " + "\n- ".join(reasons)
             raise DeviceSafetyError(msg)

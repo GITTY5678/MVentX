@@ -165,6 +165,36 @@ class ISOService(QObject):
             self.operation_failed.emit("Menu Generation Error (Rolled Back)", str(exc))
             return None
 
+    def register_windows_media(
+        self,
+        display_name: str,
+        bootloader_path: str = "/efi/boot/bootx64.efi",
+        staged_subfolder: Optional[str] = None,
+        iso_file: Optional[Union[Path, str]] = None,
+        description: Optional[str] = None,
+        enabled: bool = True,
+    ) -> Optional[EnvironmentRecord]:
+        """Register a Windows installation media environment."""
+        if not self._registration_manager:
+            self.operation_failed.emit("Device Not Selected", "Please select a valid MVentX drive first.")
+            return None
+
+        try:
+            record = self._registration_manager.register_windows_media(
+                display_name=display_name,
+                bootloader_path=bootloader_path,
+                staged_subfolder=staged_subfolder,
+                iso_path=iso_file,
+                description=description,
+                enabled=enabled,
+            )
+            self.operation_succeeded.emit(f"Successfully registered Windows environment '{record.display_name}'.")
+            self.environments_changed.emit()
+            return record
+        except Exception as exc:
+            self.operation_failed.emit("Registration Failed", str(exc))
+            return None
+
     def rename_environment(self, env_id: str, new_name: str) -> bool:
         """Rename an existing environment."""
         if not self._registration_manager:

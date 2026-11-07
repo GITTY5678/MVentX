@@ -8,6 +8,7 @@ reordering boot targets, and compiling updated GRUB boot menus.
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 from pathlib import Path
 import sys
@@ -62,6 +63,10 @@ def create_app(data_path: Optional[Path] = None, boot_path: Optional[Path] = Non
 
 def main() -> int:
     """Launch the MVentX Manager desktop application."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="MVentX Desktop Boot Management Interface")
     parser.add_argument(
         "--data",

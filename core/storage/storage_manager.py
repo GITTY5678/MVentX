@@ -117,14 +117,25 @@ class StorageManager:
     # Configuration Management
     # --------------------------------------------------------------------------
 
-    def load_configuration(self) -> Dict[str, Any]:
-        """Load and parse the authoritative mventx.json configuration from MVX_DATA."""
-        if not self.config_file_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {self.config_file_path}")
+    def load_configuration(self, auto_repair: bool = False) -> Dict[str, Any]:
+        """Load and parse the authoritative mventx.json configuration from MVX_DATA.
 
-        with open(self.config_file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
+        If auto_repair is True, automatically repairs corrupt/truncated files or recovers
+        from the latest intact backup in backups/.
+        """
+        if not auto_repair:
+            if not self.config_file_path.exists():
+                raise FileNotFoundError(f"Configuration file not found: {self.config_file_path}")
+            with open(self.config_file_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        from core.config.repair import ConfigRepairer
+        cfg, _ = ConfigRepairer.load_or_recover(
+            config_path=self.config_file_path,
+            backups_dir=self.backups_directory_path,
+            iso_dir=self.iso_directory_path,
+        )
+        return cfg
 
     def backup_configuration(self, max_retained_backups: int = 10) -> Path:
         """Create a timestamped backup of config/mventx.json in backups/.

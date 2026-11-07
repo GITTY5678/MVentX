@@ -341,5 +341,35 @@ QLabel.statusBadgeWarning {{
     font-size: 11px;
     font-weight: 600;
 }}
+
+QLabel.statusBadgeValid {{
+    background-color: {COLOR_SUCCESS_BG};
+    color: {COLOR_SUCCESS};
+    border: 1px solid {COLOR_SUCCESS};
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+QLabel.statusBadgeCorrupted {{
+    background-color: {COLOR_DANGER_BG};
+    color: {COLOR_DANGER};
+    border: 1px solid {COLOR_DANGER};
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 700;
+}}
+
+QLabel.statusBadgeUninitialized {{
+    background-color: {COLOR_ACCENT_LIGHT};
+    color: {COLOR_ACCENT};
+    border: 1px solid {COLOR_ACCENT};
+    border-radius: 12px;
+    padding: 3px 12px;
+    font-size: 11px;
+    font-weight: 700;
+}}
 """
 

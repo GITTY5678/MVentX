@@ -1,28 +1,39 @@
 """Dashboard Screen for MVentX Manager.
 
-Displays high-level device status, partition health, storage utilization,
-and registered environment metrics with modern compact cards.
+Displays high-level device status, validation badge, partition health (including
+mount points, filesystems, and read/write states), storage utilization, and
+direct action shortcuts (Open in File Explorer, Copy ISO to USB, Safely Eject).
 """
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import subprocess
+import sys
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
+from core.host.device_classification import MVentXStatus
 from core.iso_manager import StorageMetrics
 from manager.services.device_service import ActiveTarget
 from manager.services.iso_service import ISOService
+from manager.services.workers import ISOCopyWorker
+from manager.ui.progress_dialog import OperationProgressDialog
 from manager.ui.styles import (
     COLOR_ACCENT,
     COLOR_DANGER,
@@ -71,7 +82,7 @@ class MetricCard(QFrame):
 
 
 class DashboardScreen(QWidget):
-    """Main overview dashboard."""
+    """Main overview dashboard with health badges, metrics, and direct action shortcuts."""
 
     navigate_requested = Signal(str)  # Screen name to switch to
 
@@ -86,44 +97,93 @@ class DashboardScreen(QWidget):
     def _setup_ui(self) -> None:
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(20)
+        main_layout.setSpacing(16)
 
-        # 1. Device Status Banner Card
+        # ----------------------------------------------------------------------
+        # 1. Device Status Banner Card + Validation Badge + Action Shortcuts
+        # ----------------------------------------------------------------------
         self.device_card = QFrame()
         self.device_card.setProperty("class", "card")
-        dev_layout = QHBoxLayout(self.device_card)
+        dev_layout = QVBoxLayout(self.device_card)
         dev_layout.setContentsMargins(20, 16, 20, 16)
+        dev_layout.setSpacing(14)
 
+        top_row = QHBoxLayout()
         info_box = QVBoxLayout()
         info_box.setSpacing(4)
+
+        title_badge_row = QHBoxLayout()
+        title_badge_row.setSpacing(12)
         self.device_title = QLabel("No MVentX Device Selected")
         self.device_title.setStyleSheet("font-size: 18px; font-weight: 700; color: #f3f4f6;")
+        title_badge_row.addWidget(self.device_title)
+
+        self.badge_status = QLabel("DISCONNECTED")
+        self.badge_status.setProperty("class", "statusBadgeDisabled")
+        title_badge_row.addWidget(self.badge_status)
+        title_badge_row.addStretch()
+
         self.device_subtitle = QLabel("Please connect a physical MVentX USB drive or select a virtual disk.")
         self.device_subtitle.setStyleSheet("color: #9ca3af; font-size: 12px;")
-        info_box.addWidget(self.device_title)
+
+        info_box.addLayout(title_badge_row)
         info_box.addWidget(self.device_subtitle)
+        top_row.addLayout(info_box, stretch=1)
 
-        dev_layout.addLayout(info_box)
-        dev_layout.addStretch()
-
+        # Navigation shortcut buttons
         self.btn_manage_storage = QPushButton("Inspect Storage")
         self.btn_manage_storage.clicked.connect(lambda: self.navigate_requested.emit("storage"))
-        dev_layout.addWidget(self.btn_manage_storage)
+        top_row.addWidget(self.btn_manage_storage)
 
-        self.btn_add_env = QPushButton("Add Environment")
+        self.btn_add_env = QPushButton("+ Add Environment")
         self.btn_add_env.setProperty("class", "primaryButton")
         self.btn_add_env.clicked.connect(lambda: self.navigate_requested.emit("add"))
-        dev_layout.addWidget(self.btn_add_env)
+        top_row.addWidget(self.btn_add_env)
+
+        dev_layout.addLayout(top_row)
+
+        # Direct Actions Toolbar
+        actions_sep = QFrame()
+        actions_sep.setFrameShape(QFrame.HLine)
+        actions_sep.setStyleSheet("color: #2e323b;")
+        dev_layout.addWidget(actions_sep)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(12)
+
+        action_title = QLabel("QUICK SHORTCUTS:")
+        action_title.setProperty("class", "metricLabel")
+        actions_row.addWidget(action_title)
+
+        self.btn_open_explorer = QPushButton("📁 Open in File Explorer")
+        self.btn_open_explorer.setEnabled(False)
+        self.btn_open_explorer.clicked.connect(self._on_open_explorer)
+        actions_row.addWidget(self.btn_open_explorer)
+
+        self.btn_copy_iso = QPushButton("📥 Copy ISO to USB...")
+        self.btn_copy_iso.setEnabled(False)
+        self.btn_copy_iso.clicked.connect(self._on_copy_iso_clicked)
+        actions_row.addWidget(self.btn_copy_iso)
+
+        self.btn_eject_usb = QPushButton("⏏ Safely Eject USB")
+        self.btn_eject_usb.setEnabled(False)
+        self.btn_eject_usb.clicked.connect(self._on_eject_clicked)
+        actions_row.addWidget(self.btn_eject_usb)
+
+        actions_row.addStretch()
+        dev_layout.addLayout(actions_row)
 
         main_layout.addWidget(self.device_card)
 
+        # ----------------------------------------------------------------------
         # 2. Metric Cards Grid
+        # ----------------------------------------------------------------------
         grid = QGridLayout()
-        grid.setSpacing(16)
+        grid.setSpacing(14)
 
         self.card_envs = MetricCard("Registered Environments", "0", "0 active in boot menu")
         self.card_isos = MetricCard("Registered ISO Size", "0.00 B", "Across 0 image files")
-        self.card_capacity = MetricCard("Available Capacity", "0.00 B", "Total capacity: 0.00 B")
+        self.card_capacity = MetricCard("Total Capacity", "0.00 B", "Free: 0.00 B")
         self.card_missing = MetricCard("Missing ISOs", "0", "All registered files verified")
 
         grid.addWidget(self.card_envs, 0, 0)
@@ -133,7 +193,9 @@ class DashboardScreen(QWidget):
 
         main_layout.addLayout(grid)
 
+        # ----------------------------------------------------------------------
         # 3. Storage Utilization Card
+        # ----------------------------------------------------------------------
         self.storage_card = QFrame()
         self.storage_card.setProperty("class", "card")
         st_layout = QVBoxLayout(self.storage_card)
@@ -159,7 +221,9 @@ class DashboardScreen(QWidget):
 
         main_layout.addWidget(self.storage_card)
 
+        # ----------------------------------------------------------------------
         # 4. Partition Health Status
+        # ----------------------------------------------------------------------
         self.health_card = QFrame()
         self.health_card.setProperty("class", "card")
         health_layout = QVBoxLayout(self.health_card)
@@ -198,6 +262,10 @@ class DashboardScreen(QWidget):
 
         main_layout.addStretch()
 
+    # --------------------------------------------------------------------------
+    # Data Refresh & State Updates
+    # --------------------------------------------------------------------------
+
     def refresh_data(self) -> None:
         """Update metrics and device info from service."""
         target: Optional[ActiveTarget] = self.iso_service.device_service.active_target
@@ -205,11 +273,19 @@ class DashboardScreen(QWidget):
         if not target:
             self.device_title.setText("No MVentX Device Selected")
             self.device_subtitle.setText("Please connect a physical MVentX USB drive or select a virtual disk above.")
+            self.badge_status.setText("DISCONNECTED")
+            self.badge_status.setProperty("class", "statusBadgeDisabled")
+            self.badge_status.setStyleSheet("")
+
             self.btn_add_env.setEnabled(False)
             self.btn_manage_storage.setEnabled(False)
+            self.btn_open_explorer.setEnabled(False)
+            self.btn_copy_iso.setEnabled(False)
+            self.btn_eject_usb.setEnabled(False)
+
             self.card_envs.set_value("0", "0 active")
             self.card_isos.set_value("0.00 B", "No target selected")
-            self.card_capacity.set_value("0.00 B", "No target selected")
+            self.card_capacity.set_value("0.00 B", "Free: 0.00 B")
             self.card_missing.set_value("0", "No target selected")
             self.storage_progress.setValue(0)
             self.storage_text.setText("0.00 B used of 0.00 B (0%)")
@@ -219,6 +295,12 @@ class DashboardScreen(QWidget):
 
         self.btn_add_env.setEnabled(True)
         self.btn_manage_storage.setEnabled(True)
+        self.btn_open_explorer.setEnabled(target.data_mount.is_dir())
+        self.btn_copy_iso.setEnabled(target.data_mount.is_dir())
+        self.btn_eject_usb.setEnabled(True)
+
+        # Update Validation Badge
+        self._update_validation_badge(target)
 
         # Update Device Title
         if target.is_virtual:
@@ -228,9 +310,13 @@ class DashboardScreen(QWidget):
             self.device_title.setText(f"MVentX USB ({target.display_name})")
             self.device_subtitle.setText(f"Data: {target.data_mount} | Boot: {target.boot_mount or 'Not mounted'}")
 
+        # Check Read/Write status
+        p1_rw = "Read-Write" if (target.boot_mount and os.access(target.boot_mount, os.W_OK)) else "Read-Only"
+        p2_rw = "Read-Write" if os.access(target.data_mount, os.W_OK) else "Read-Only"
+
         # Partition 1 status
         if target.has_boot_mount:
-            self.p1_status.setText(f"Mounted at {target.boot_mount} (GRUB Menu Synchronized)")
+            self.p1_status.setText(f"Mounted at {target.boot_mount} (FAT32, {p1_rw}) • GRUB Menu Synchronized")
             self.p1_status.setStyleSheet(f"color: {COLOR_SUCCESS}; font-size: 12px;")
         else:
             self.p1_status.setText("Boot partition not mounted (Menu sync skipped)")
@@ -238,7 +324,7 @@ class DashboardScreen(QWidget):
 
         # Partition 2 status
         if target.data_mount.is_dir():
-            self.p2_status.setText(f"Mounted at {target.data_mount} (Structure Valid)")
+            self.p2_status.setText(f"Mounted at {target.data_mount} (exFAT, {p2_rw}) • Structure Valid")
             self.p2_status.setStyleSheet(f"color: {COLOR_SUCCESS}; font-size: 12px;")
         else:
             self.p2_status.setText(f"Directory not accessible: {target.data_mount}")
@@ -247,7 +333,12 @@ class DashboardScreen(QWidget):
         # Metrics
         envs = self.iso_service.list_environments()
         enabled_count = len([e for e in envs if e.enabled])
-        self.card_envs.set_value(str(len(envs)), f"{enabled_count} active in boot menu")
+        unregistered = self.iso_service.list_unregistered_isos()
+        total_isos_on_disk = len(envs) + len(unregistered)
+        self.card_envs.set_value(
+            str(len(envs)),
+            f"{enabled_count} active in menu • {total_isos_on_disk} total ISOs found",
+        )
 
         metrics = self.iso_service.get_storage_metrics()
         missing = self.iso_service.detect_missing_isos()
@@ -265,8 +356,8 @@ class DashboardScreen(QWidget):
                 f"Across {metrics.registered_iso_count} registered ISOs",
             )
             self.card_capacity.set_value(
-                _fmt_bytes(metrics.available_bytes),
-                f"Total: {_fmt_bytes(metrics.total_bytes)}",
+                _fmt_bytes(metrics.total_bytes),
+                f"Free: {_fmt_bytes(metrics.available_bytes)}",
             )
 
             if metrics.total_bytes > 0:
@@ -280,3 +371,93 @@ class DashboardScreen(QWidget):
                 self.storage_progress.setValue(0)
                 self.storage_text.setText("Storage capacity unknown")
 
+    def _update_validation_badge(self, target: ActiveTarget) -> None:
+        """Render validation status badge based on target classification."""
+        status = None
+        if target.classification:
+            status = target.classification.status
+
+        if status == MVentXStatus.VALID_MVENTX or (status is None and target.data_mount.is_dir()):
+            self.badge_status.setText("VALID MVX")
+            self.badge_status.setProperty("class", "statusBadgeValid")
+            self.badge_status.setStyleSheet("")
+        elif status == MVentXStatus.CORRUPTED_INSTALLATION:
+            self.badge_status.setText("CORRUPTED")
+            self.badge_status.setProperty("class", "statusBadgeCorrupted")
+            self.badge_status.setStyleSheet("")
+        elif status == MVentXStatus.INCOMPLETE_INSTALLATION:
+            self.badge_status.setText("INCOMPLETE")
+            self.badge_status.setProperty("class", "statusBadgeUninitialized")
+            self.badge_status.setStyleSheet("")
+        elif status == MVentXStatus.INACCESSIBLE:
+            self.badge_status.setText("INACCESSIBLE")
+            self.badge_status.setProperty("class", "statusBadgeCorrupted")
+            self.badge_status.setStyleSheet("")
+        else:
+            self.badge_status.setText("STANDARD USB")
+            self.badge_status.setProperty("class", "statusBadgeWarning")
+            self.badge_status.setStyleSheet("")
+
+    # --------------------------------------------------------------------------
+    # Direct Action Shortcuts
+    # --------------------------------------------------------------------------
+
+    def _on_open_explorer(self) -> None:
+        target = self.iso_service.device_service.active_target
+        if not target or not target.data_mount.is_dir():
+            return
+
+        path_str = str(target.data_mount)
+        if sys.platform == "win32":
+            os.startfile(path_str)
+        elif sys.platform == "darwin":
+            subprocess.run(["open", path_str], check=False)
+        else:
+            subprocess.run(["xdg-open", path_str], check=False)
+
+    def _on_copy_iso_clicked(self) -> None:
+        target = self.iso_service.device_service.active_target
+        if not target or not target.data_mount.is_dir():
+            return
+
+        source_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select ISO Image to Copy",
+            "",
+            "Disk Images (*.iso *.img);;All Files (*.*)",
+        )
+        if not source_file:
+            return
+
+        src_p = Path(source_file)
+        dest_dir = target.data_mount / "ISO"
+        worker = ISOCopyWorker(
+            source_path=src_p,
+            destination_dir=dest_dir,
+            dest_filename=src_p.name,
+            parent=self,
+        )
+
+        dlg = OperationProgressDialog(
+            title="Copying ISO Image",
+            operation_description=f"Copying {src_p.name} to USB drive...",
+            worker=worker,
+            parent=self,
+        )
+
+        worker.start()
+        res = dlg.exec()
+
+        if res == OperationProgressDialog.Accepted:
+            QMessageBox.information(
+                self,
+                "ISO Copied",
+                f"Successfully copied '{src_p.name}' to {dest_dir}.\n\n"
+                "You can now register it in the Add Environment screen.",
+            )
+            self.refresh_data()
+        elif not worker._is_cancelled:
+            QMessageBox.warning(self, "Copy Cancelled or Failed", "The ISO copy operation did not complete.")
+
+    def _on_eject_clicked(self) -> None:
+        self.iso_service.device_service.eject_active_device()

@@ -84,4 +84,11 @@ class PartitionManager:
                 "Virtual disk target mode must be used for testing and validation."
             )
 
+        from core.host.host_platform import HostPlatform
+        if HostPlatform.is_windows():
+            from installer.windows_physical_installer import WindowsPhysicalInstaller
+            win_installer = WindowsPhysicalInstaller(allow_physical_formatting=self.allow_physical_formatting)
+            disk_num = win_installer.extract_disk_number(device.device_id)
+            return win_installer.prepare_physical_partitions(disk_number=disk_num, esp_size_mb=esp_size_mb)
+
         raise NotImplementedError("Physical device formatting will be enabled in future releases after validation.")

@@ -81,6 +81,7 @@ class InstallationService:
 
         def report(step: int, msg: str) -> None:
             logger.info("Installation Step %d/%d: %s", step, total_steps, msg)
+            self.recovery_service.track_stage(step, msg)
             if progress_callback:
                 progress_callback(step, total_steps, msg)
             if is_cancelled and is_cancelled():
@@ -185,4 +186,41 @@ class InstallationService:
                 target_path=str(out_image),
                 error_message=str(exc),
             )
+
+    def install_to_physical_device(
+        self,
+        device: DeviceInfo,
+        expected_fingerprint: str,
+        esp_size_mb: int = DEFAULT_ESP_SIZE_MB,
+        menu_title: str = "MVentX Multiboot System",
+        menu_timeout: int = 10,
+        progress_callback: Optional[ProgressCallback] = None,
+        is_cancelled: Optional[Callable[[], bool]] = None,
+    ) -> InstallationResult:
+        """Execute physical USB installation with pre-write revalidation and full 12-step verification."""
+        if not self.partition_manager.allow_physical_formatting:
+            raise PermissionError(
+                "CRITICAL SAFETY SHIELD: Physical storage device formatting is disabled by policy. "
+                "allow_physical_formatting=True required."
+            )
+
+        from core.host.host_platform import HostPlatform
+        if HostPlatform.is_windows():
+            from installer.windows_physical_installer import WindowsPhysicalInstaller
+            win_installer = WindowsPhysicalInstaller(
+                device_manager=self.device_manager,
+                allow_physical_formatting=self.partition_manager.allow_physical_formatting,
+            )
+            return win_installer.install_to_physical_disk(
+                device=device,
+                expected_fingerprint=expected_fingerprint,
+                esp_size_mb=esp_size_mb,
+                menu_title=menu_title,
+                menu_timeout=menu_timeout,
+                progress_callback=progress_callback,
+                is_cancelled=is_cancelled,
+            )
+
+        raise NotImplementedError("Physical device installation is currently supported on Windows.")
+
 

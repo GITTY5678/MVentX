@@ -13,6 +13,7 @@ from typing import Optional
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.diagnostics.diagnostic_report import DiagnosticReportGenerator
 from manager.services.iso_service import ISOService
 from manager.ui.styles import COLOR_ACCENT, COLOR_SUCCESS
 
@@ -127,6 +129,38 @@ class SettingsScreen(QWidget):
         bk_layout.addLayout(bk_btns)
 
         main_layout.addWidget(self.backup_card)
+
+        # 3. Diagnostics & Troubleshooting Card
+        self.diag_card = QFrame()
+        self.diag_card.setProperty("class", "card")
+        d_layout = QVBoxLayout(self.diag_card)
+        d_layout.setSpacing(12)
+
+        d_hdr = QLabel("TROUBLESHOOTING & SYSTEM DIAGNOSTICS")
+        d_hdr.setProperty("class", "metricLabel")
+        d_layout.addWidget(d_hdr)
+
+        d_desc = QLabel(
+            "Compile a complete diagnostic report detailing host OS privileges, partition health, "
+            "configuration integrity, missing files, and bootloader files for technical troubleshooting."
+        )
+        d_desc.setWordWrap(True)
+        d_desc.setStyleSheet("color: #9ca3af; font-size: 12px;")
+        d_layout.addWidget(d_desc)
+
+        d_btn_row = QHBoxLayout()
+        d_btn_row.addStretch()
+
+        self.btn_export_diag_md = QPushButton("Export Diagnostic Report (.md)...")
+        self.btn_export_diag_md.clicked.connect(lambda: self._export_diagnostic_report("markdown"))
+        d_btn_row.addWidget(self.btn_export_diag_md)
+
+        self.btn_export_diag_json = QPushButton("Export Diagnostic Report (.json)...")
+        self.btn_export_diag_json.clicked.connect(lambda: self._export_diagnostic_report("json"))
+        d_btn_row.addWidget(self.btn_export_diag_json)
+
+        d_layout.addLayout(d_btn_row)
+        main_layout.addWidget(self.diag_card)
 
         # 3. About Card
         self.about_card = QFrame()
@@ -234,4 +268,32 @@ class SettingsScreen(QWidget):
             if self.iso_service.restore_backup(backup_path):
                 QMessageBox.information(self, "Restored", f"Successfully restored {backup_path.name}.")
                 self.load_settings()
+
+    def _export_diagnostic_report(self, report_format: str) -> None:
+        target = self.iso_service.device_service.active_target
+        if not target or not target.data_mount.is_dir():
+            QMessageBox.warning(self, "No Target", "Please select an active MVentX storage target first.")
+            return
+
+        generator = DiagnosticReportGenerator(
+            data_mount=target.data_mount,
+            boot_mount=target.boot_mount,
+        )
+        report = generator.generate_report()
+
+        ext = ".json" if report_format == "json" else ".md"
+        filter_str = "JSON Files (*.json)" if report_format == "json" else "Markdown Files (*.md)"
+        default_name = f"mventx_diagnostic_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}{ext}"
+
+        dest_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Diagnostic Report",
+            default_name,
+            filter_str,
+        )
+
+        if dest_file:
+            content = report.to_json(indent=2) if report_format == "json" else report.to_markdown()
+            Path(dest_file).write_text(content, encoding="utf-8")
+            QMessageBox.information(self, "Report Exported", f"Diagnostic report saved successfully to:\n{dest_file}")
 
