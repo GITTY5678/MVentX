@@ -153,6 +153,42 @@ def create_newc_cpio(entries: List[Tuple[str, int, bytes]]) -> bytes:
     return buf.getvalue()
 
 
+def parse_newc_cpio_entries(cpio_bytes: bytes) -> Dict[str, bytes]:
+    """Parse a newc (070701/070702) CPIO archive into a mapping of {archive_path: content_bytes}."""
+    entries: Dict[str, bytes] = {}
+    offset = 0
+    n = len(cpio_bytes)
+    while offset + 110 <= n:
+        magic = cpio_bytes[offset : offset + 6]
+        if magic not in (b"070701", b"070702"):
+            # Skip zero padding between concatenated archives
+            if cpio_bytes[offset : offset + 1] == b"\x00":
+                offset += 1
+                continue
+            break
+        try:
+            filesize = int(cpio_bytes[offset + 54 : offset + 62], 16)
+            namesize = int(cpio_bytes[offset + 94 : offset + 102], 16)
+        except ValueError:
+            break
+        name_start = offset + 110
+        name_end = name_start + namesize
+        if name_end > n:
+            break
+        name = cpio_bytes[name_start : name_end - 1].decode("utf-8", errors="ignore").lstrip("./")
+        pad1 = (4 - ((110 + namesize) % 4)) % 4
+        data_start = name_end + pad1
+        data_end = data_start + filesize
+        if data_end > n:
+            break
+        pad2 = (4 - (filesize % 4)) % 4
+        offset = data_end + pad2
+        if name == "TRAILER!!!":
+            continue
+        entries[name] = cpio_bytes[data_start:data_end]
+    return entries
+
+
 class InitramfsOverlayGenerator:
     """Manages extraction of kernel modules from ISO SquashFS and building CPIO overlays."""
 
@@ -209,6 +245,165 @@ class InitramfsOverlayGenerator:
         b"/scripts/casper-premount/00_mventx_exfat\n"
     )
 
+    ALPINE_MDEV_HOOK = (
+        b"#!/bin/sh\n"
+        b"# MVentX Alpine Early-Boot mdev Hook for exFAT + ISO Loopback Attachment\n"
+        b"/bin/busybox mdev \"$@\"\n"
+        b"MDEV_RC=$?\n"
+        b"\n"
+        b"if [ -f /init ] && [ ! -f /tmp/.mventx_iso_attached ] && [ -n \"$DEVNAME\" ]; then\n"
+        b"    case \"$DEVNAME\" in\n"
+        b"        loop*|ram*|fd*) exit $MDEV_RC ;;\n"
+        b"    esac\n"
+        b"    DEVNODE=\"/dev/${DEVNAME}\"\n"
+        b"    [ -b \"$DEVNODE\" ] || exit $MDEV_RC\n"
+        b"\n"
+        b"    ISO_PATH=\"\"\n"
+        b"    for arg in $(cat /proc/cmdline 2>/dev/null); do\n"
+        b"        case \"$arg\" in\n"
+        b"            iso-scan/filename=*) ISO_PATH=\"${arg#iso-scan/filename=}\" ;;\n"
+        b"            findiso=*) ISO_PATH=\"${arg#findiso=}\" ;;\n"
+        b"            alpine_iso=*) ISO_PATH=\"${arg#alpine_iso=}\" ;;\n"
+        b"        esac\n"
+        b"    done\n"
+        b"    ISO_REL=\"${ISO_PATH#/}\"\n"
+        b"    [ -n \"$ISO_REL\" ] || exit $MDEV_RC\n"
+        b"\n"
+        b"    KVER=$(uname -r)\n"
+        b"    if ! grep -q exfat /proc/filesystems 2>/dev/null; then\n"
+        b"        modprobe exfat 2>/dev/null || true\n"
+        b"        if ! grep -q exfat /proc/filesystems 2>/dev/null; then\n"
+        b"            for mod in \"/usr/lib/modules/${KVER}\"/kernel/fs/nls/*.ko \"/usr/lib/modules/${KVER}\"/kernel/fs/exfat/*.ko; do\n"
+        b"                [ -f \"$mod\" ] && insmod \"$mod\" 2>/dev/null || true\n"
+        b"            done\n"
+        b"        fi\n"
+        b"    fi\n"
+        b"    modprobe loop 2>/dev/null || true\n"
+        b"    modprobe isofs 2>/dev/null || true\n"
+        b"\n"
+        b"    mkdir -p /media/mventx_data 2>/dev/null || true\n"
+        b"    if ! grep -q \" /media/mventx_data \" /proc/mounts 2>/dev/null; then\n"
+        b"        if mount -t exfat -o ro \"$DEVNODE\" /media/mventx_data 2>/dev/null || mount -o ro \"$DEVNODE\" /media/mventx_data 2>/dev/null; then\n"
+        b"            if [ -f \"/media/mventx_data/${ISO_REL}\" ]; then\n"
+        b"                touch /tmp/.mventx_iso_attached\n"
+        b"                echo \"[MVentX] Mounted MVX_DATA ($DEVNODE) on /media/mventx_data (exfat)\" >/dev/kmsg 2>/dev/null || true\n"
+        b"                LOOP_DEV=$(losetup -f 2>/dev/null || echo /dev/loop0)\n"
+        b"                if losetup -r \"$LOOP_DEV\" \"/media/mventx_data/${ISO_REL}\" 2>/dev/null || losetup \"$LOOP_DEV\" \"/media/mventx_data/${ISO_REL}\" 2>/dev/null; then\n"
+        b"                    echo \"[MVentX] Attached Alpine ISO /media/mventx_data/${ISO_REL} to ${LOOP_DEV}\" >/dev/kmsg 2>/dev/null || true\n"
+        b"                    LOOP_NAME=\"${LOOP_DEV#/dev/}\"\n"
+        b"                    if [ -e \"/sys/class/block/${LOOP_NAME}/uevent\" ]; then\n"
+        b"                        echo add > \"/sys/class/block/${LOOP_NAME}/uevent\" 2>/dev/null || true\n"
+        b"                    fi\n"
+        b"                fi\n"
+        b"            else\n"
+        b"                umount /media/mventx_data 2>/dev/null || true\n"
+        b"            fi\n"
+        b"        fi\n"
+        b"    fi\n"
+        b"fi\n"
+        b"exit $MDEV_RC\n"
+    )
+
+    ALPINE_NLPLUG_WRAPPER = (
+        b"#!/bin/sh\n"
+        b"# MVentX Alpine Early-Boot nlplug-findfs Wrapper for exFAT ISO Loopback\n"
+        b"KVER=$(uname -r)\n"
+        b"\n"
+        b"if ! grep -q exfat /proc/filesystems 2>/dev/null; then\n"
+        b"    modprobe exfat 2>/dev/null || true\n"
+        b"    if ! grep -q exfat /proc/filesystems 2>/dev/null; then\n"
+        b"        for mod in \"/usr/lib/modules/${KVER}\"/kernel/fs/nls/*.ko \"/usr/lib/modules/${KVER}\"/kernel/fs/exfat/*.ko; do\n"
+        b"            [ -f \"$mod\" ] && insmod \"$mod\" 2>/dev/null || true\n"
+        b"        done\n"
+        b"    fi\n"
+        b"fi\n"
+        b"if grep -q exfat /proc/filesystems 2>/dev/null; then\n"
+        b"    echo \"[MVentX] exfat kernel module loaded successfully for ${KVER}\" >/dev/kmsg 2>/dev/null || true\n"
+        b"    echo \"[MVentX] exfat kernel module loaded successfully for ${KVER}\"\n"
+        b"fi\n"
+        b"modprobe loop 2>/dev/null || true\n"
+        b"modprobe isofs 2>/dev/null || true\n"
+        b"modprobe squashfs 2>/dev/null || true\n"
+        b"modprobe usb-storage 2>/dev/null || true\n"
+        b"modprobe uas 2>/dev/null || true\n"
+        b"modprobe sd-mod 2>/dev/null || true\n"
+        b"\n"
+        b"NL_RC=0\n"
+        b"if [ -x /usr/sbin/nlplug-findfs.real ]; then\n"
+        b"    /usr/sbin/nlplug-findfs.real \"$@\"\n"
+        b"    NL_RC=$?\n"
+        b"fi\n"
+        b"\n"
+        b"if [ -s /tmp/repositories ]; then\n"
+        b"    echo \"[MVentX] Alpine boot repository discovered: $(cat /tmp/repositories)\" >/dev/kmsg 2>/dev/null || true\n"
+        b"    exit 0\n"
+        b"fi\n"
+        b"\n"
+        b"ISO_PATH=\"\"\n"
+        b"for arg in $(cat /proc/cmdline 2>/dev/null); do\n"
+        b"    case \"$arg\" in\n"
+        b"        iso-scan/filename=*) ISO_PATH=\"${arg#iso-scan/filename=}\" ;;\n"
+        b"        findiso=*) ISO_PATH=\"${arg#findiso=}\" ;;\n"
+        b"        alpine_iso=*) ISO_PATH=\"${arg#alpine_iso=}\" ;;\n"
+        b"    esac\n"
+        b"done\n"
+        b"ISO_REL=\"${ISO_PATH#/}\"\n"
+        b"\n"
+        b"if [ -n \"$ISO_REL\" ]; then\n"
+        b"    mkdir -p /media/mventx_data /media/cdrom 2>/dev/null || true\n"
+        b"    attempt=0\n"
+        b"    while [ $attempt -lt 8 ]; do\n"
+        b"        if [ ! -f \"/media/mventx_data/${ISO_REL}\" ]; then\n"
+        b"            for dev in /dev/sd*[0-9] /dev/vd*[0-9] /dev/nvme*n*p* /dev/mmcblk*p* /dev/hd*[0-9]; do\n"
+        b"                [ -b \"$dev\" ] || continue\n"
+        b"                grep -q \"^${dev} \" /proc/mounts 2>/dev/null && continue\n"
+        b"                if mount -t exfat -o ro \"$dev\" /media/mventx_data 2>/dev/null || mount -o ro \"$dev\" /media/mventx_data 2>/dev/null; then\n"
+        b"                    if [ -f \"/media/mventx_data/${ISO_REL}\" ]; then\n"
+        b"                        echo \"[MVentX] Mounted MVX_DATA ($dev) on /media/mventx_data\" >/dev/kmsg 2>/dev/null || true\n"
+        b"                        break\n"
+        b"                    fi\n"
+        b"                    umount /media/mventx_data 2>/dev/null || true\n"
+        b"                fi\n"
+        b"            done\n"
+        b"        fi\n"
+        b"\n"
+        b"        if [ -f \"/media/mventx_data/${ISO_REL}\" ]; then\n"
+        b"            if ! grep -q \" /media/cdrom \" /proc/mounts 2>/dev/null && ! grep -q \" /media/loop0 \" /proc/mounts 2>/dev/null; then\n"
+        b"                ATTACHED_LOOP=\"\"\n"
+        b"                for lsys in /sys/block/loop*/loop/backing_file; do\n"
+        b"                    [ -f \"$lsys\" ] || continue\n"
+        b"                    if [ \"$(cat \"$lsys\" 2>/dev/null)\" = \"/media/mventx_data/${ISO_REL}\" ]; then\n"
+        b"                        lname=\"${lsys#/sys/block/}\"\n"
+        b"                        lname=\"${lname%/loop/backing_file}\"\n"
+        b"                        ATTACHED_LOOP=\"/dev/${lname}\"\n"
+        b"                        break\n"
+        b"                    fi\n"
+        b"                done\n"
+        b"                if [ -n \"$ATTACHED_LOOP\" ]; then\n"
+        b"                    mount -t iso9660 -o ro \"$ATTACHED_LOOP\" /media/cdrom 2>/dev/null || true\n"
+        b"                else\n"
+        b"                    mount -t iso9660 -o loop,ro \"/media/mventx_data/${ISO_REL}\" /media/cdrom 2>/dev/null || true\n"
+        b"                fi\n"
+        b"            fi\n"
+        b"\n"
+        b"            for mnt in /media/cdrom /media/loop0; do\n"
+        b"                if [ -f \"${mnt}/apks/.boot_repository\" ]; then\n"
+        b"                    echo \"${mnt}/apks\" > /tmp/repositories\n"
+        b"                    echo \"[MVentX] Alpine ISO mounted at ${mnt}; repository=${mnt}/apks\" >/dev/kmsg 2>/dev/null || true\n"
+        b"                    echo \"[MVentX] Alpine ISO mounted at ${mnt}; repository=${mnt}/apks\"\n"
+        b"                    exit 0\n"
+        b"                fi\n"
+        b"            done\n"
+        b"        fi\n"
+        b"\n"
+        b"        attempt=$((attempt + 1))\n"
+        b"        sleep 1\n"
+        b"    done\n"
+        b"fi\n"
+        b"\n"
+        b"exit $NL_RC\n"
+    )
+
     SQUASHFS_CANDIDATE_PATTERNS = (
         "*filesystem.squashfs",
         "casper/minimal.squashfs",
@@ -218,13 +413,19 @@ class InitramfsOverlayGenerator:
         "*minimal.standard.squashfs",
     )
 
+    ALPINE_MODLOOP_PATTERNS = (
+        "boot/modloop-*",
+        "*modloop-*",
+        "*modloop*",
+    )
+
     @classmethod
     def can_generate_overlay(
         cls,
         iso_path: Union[Path, str],
         seven_zip_path: Optional[Union[Path, str]] = None,
     ) -> bool:
-        """Check if 7-Zip is available and the target ISO contains a Live SquashFS image."""
+        """Check if 7-Zip is available and the target ISO contains a Live SquashFS or Alpine modloop image."""
         tool_7z = Path(seven_zip_path) if seven_zip_path else find_seven_zip()
         if not tool_7z or not tool_7z.is_file():
             return False
@@ -232,11 +433,38 @@ class InitramfsOverlayGenerator:
         if not iso_p.is_file():
             return False
         try:
-            cmd = [str(tool_7z), "l", str(iso_p), "*.squashfs*", "-r"]
+            cmd = [str(tool_7z), "l", str(iso_p), "*.squashfs*", "*modloop*", "-r"]
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            return bool(res.returncode == 0 and ".squashfs" in res.stdout.lower())
+            out_low = res.stdout.lower()
+            return bool(res.returncode == 0 and (".squashfs" in out_low or "modloop" in out_low))
         except Exception:
             return False
+
+    @classmethod
+    def extract_file_from_initramfs(
+        cls,
+        initrd_file: Path,
+        target_rel_paths: Tuple[str, ...],
+    ) -> Optional[bytes]:
+        """Extract a specific file (such as usr/sbin/nlplug-findfs) from a gzip/raw CPIO initramfs."""
+        if not initrd_file.is_file():
+            return None
+        try:
+            raw = initrd_file.read_bytes()
+            if raw[:2] == b"\x1f\x8b":
+                cpio_bytes = gzip.decompress(raw)
+            elif raw[:6] == b"\xfd7zXZ\x00":
+                cpio_bytes = lzma.decompress(raw)
+            else:
+                cpio_bytes = raw
+            entries = parse_newc_cpio_entries(cpio_bytes)
+            for rel in target_rel_paths:
+                norm = rel.lstrip("./")
+                if norm in entries and len(entries[norm]) > 0:
+                    return entries[norm]
+        except Exception:
+            pass
+        return None
 
     @classmethod
     def decompress_module_bytes(cls, path: Path, raw_bytes: bytes, seven_zip_path: Optional[Path] = None) -> bytes:
@@ -296,15 +524,21 @@ class InitramfsOverlayGenerator:
         output_cpio_path: Union[Path, str],
         target_kernel_version: Optional[str] = None,
         seven_zip_path: Optional[Union[Path, str]] = None,
+        recipe: Optional[str] = None,
+        kernel_path: Optional[str] = None,
+        initrd_path: Optional[str] = None,
     ) -> OverlayGenerationResult:
-        """Extract exfat.ko from an Ubuntu Live ISO and build a bootable CPIO overlay.
+        """Extract exfat.ko from an Ubuntu Casper or Alpine Linux ISO and build a bootable CPIO overlay.
 
         Args:
-            iso_path: Path to the source Ubuntu / Casper ISO file.
+            iso_path: Path to the source ISO file.
             output_cpio_path: Destination path on MVX_BOOT for the generated CPIO archive.
             target_kernel_version: Optional explicit kernel version string. If omitted,
                                   automatically parsed from the ISO's vmlinuz boot header.
             seven_zip_path: Optional path to 7z.exe executable.
+            recipe: Optional recipe hint ('casper' or 'alpine').
+            kernel_path: Optional discovered/configured kernel path inside ISO (e.g. '/boot/vmlinuz-lts').
+            initrd_path: Optional discovered/configured initramfs path inside ISO (e.g. '/boot/initramfs-lts').
 
         Returns:
             OverlayGenerationResult detailing extracted modules, vermagic, and signature.
@@ -325,22 +559,41 @@ class InitramfsOverlayGenerator:
         warnings: List[str] = []
         errors: List[str] = []
 
+        # Determine if target flavour is specified for Alpine (e.g. 'lts' or 'virt')
+        flavour_hint: Optional[str] = None
+        for cand_p in (kernel_path, initrd_path):
+            if cand_p:
+                base = cand_p.strip().replace("\\", "/").rsplit("/", 1)[-1]
+                if "-" in base:
+                    flavour_hint = base.split("-", 1)[1]
+                    break
+                elif "_" in base:
+                    flavour_hint = base.split("_", 1)[1]
+                    break
+
         temp_workspace = Path(tempfile.mkdtemp(prefix="mventx_overlay_build_"))
         try:
             # 1. Identify kernel version if not provided
             kernel_ver = target_kernel_version
-            if not kernel_ver:
-                # Extract vmlinuz from ISO
-                vmlinuz_dir = temp_workspace / "vmlinuz_extract"
-                vmlinuz_dir.mkdir(parents=True, exist_ok=True)
-                cmd_k = [str(tool_7z), "e", str(iso_p), f"-o{vmlinuz_dir}", "*vmlinuz*", "-r", "-y"]
-                subprocess.run(cmd_k, check=False, capture_output=True)
-                vmlinuz_candidates = list(vmlinuz_dir.glob("*vmlinuz*"))
-                if vmlinuz_candidates:
-                    k_data = vmlinuz_candidates[0].read_bytes()
+            vmlinuz_dir = temp_workspace / "vmlinuz_extract"
+            vmlinuz_dir.mkdir(parents=True, exist_ok=True)
+            vmlinuz_pattern = f"*vmlinuz-{flavour_hint}" if flavour_hint else "*vmlinuz*"
+            cmd_k = [str(tool_7z), "e", str(iso_p), f"-o{vmlinuz_dir}", vmlinuz_pattern, "-r", "-y"]
+            subprocess.run(cmd_k, check=False, capture_output=True)
+            vmlinuz_candidates = sorted(vmlinuz_dir.glob("*vmlinuz*"))
+            if not vmlinuz_candidates and flavour_hint:
+                cmd_k_any = [str(tool_7z), "e", str(iso_p), f"-o{vmlinuz_dir}", "*vmlinuz*", "-r", "-y"]
+                subprocess.run(cmd_k_any, check=False, capture_output=True)
+                vmlinuz_candidates = sorted(vmlinuz_dir.glob("*vmlinuz*"))
+            if vmlinuz_candidates:
+                selected_vmlinuz = vmlinuz_candidates[0]
+                if not flavour_hint and "-" in selected_vmlinuz.name:
+                    flavour_hint = selected_vmlinuz.name.split("-", 1)[1]
+                if not kernel_ver:
+                    k_data = selected_vmlinuz.read_bytes()
                     kernel_ver = KernelModuleInspector.extract_vmlinuz_version(k_data)
 
-            # 2. Extract Live SquashFS and locate exfat.ko + NLS modules
+            # 2. Extract Live SquashFS or Alpine modloop and locate exfat.ko + NLS modules
             sqfs_dir = temp_workspace / "squashfs_stage"
             sqfs_dir.mkdir(parents=True, exist_ok=True)
             modules_dir = temp_workspace / "extracted_modules"
@@ -349,8 +602,22 @@ class InitramfsOverlayGenerator:
             exfat_files: List[Path] = []
             tried_squashfs: List[str] = []
             last_sq_err = ""
+            is_alpine_overlay = bool(recipe and recipe.strip().lower() in ("alpine", "alpine_linux", "linux_alpine"))
 
-            for pattern in cls.SQUASHFS_CANDIDATE_PATTERNS:
+            # Build search pattern sequence based on whether Alpine or Casper is targeted
+            if is_alpine_overlay:
+                if flavour_hint:
+                    candidate_patterns: Tuple[str, ...] = (
+                        f"boot/modloop-{flavour_hint}",
+                        f"*modloop-{flavour_hint}",
+                        *cls.ALPINE_MODLOOP_PATTERNS,
+                    )
+                else:
+                    candidate_patterns = cls.ALPINE_MODLOOP_PATTERNS
+            else:
+                candidate_patterns = (*cls.SQUASHFS_CANDIDATE_PATTERNS, *cls.ALPINE_MODLOOP_PATTERNS)
+
+            for pattern in candidate_patterns:
                 cmd_sq = [str(tool_7z), "e", str(iso_p), f"-o{sqfs_dir}", pattern, "-r", "-y"]
                 proc_sq = subprocess.run(cmd_sq, capture_output=True, text=True)
                 if proc_sq.returncode != 0:
@@ -358,13 +625,25 @@ class InitramfsOverlayGenerator:
                     continue
 
                 sqfs_candidates = sorted(
-                    sqfs_dir.glob("*.squashfs"),
-                    key=lambda p: (0 if p.name in ("filesystem.squashfs", "minimal.squashfs") else 1, len(p.name)),
+                    [p for p in sqfs_dir.iterdir() if p.is_file()],
+                    key=lambda p: (
+                        0 if (flavour_hint and p.name == f"modloop-{flavour_hint}") else
+                        1 if p.name in ("filesystem.squashfs", "minimal.squashfs", "modloop-lts", "modloop-virt") else 2,
+                        len(p.name),
+                    ),
                 )
                 if not sqfs_candidates:
                     continue
 
                 for sqfs_path in sqfs_candidates:
+                    # If a specific Alpine flavour was requested and multiple modloops exist, enforce flavour match
+                    if flavour_hint and sqfs_path.name.startswith("modloop-") and sqfs_path.name != f"modloop-{flavour_hint}":
+                        if any(c.name == f"modloop-{flavour_hint}" for c in sqfs_candidates):
+                            continue
+
+                    if sqfs_path.name.startswith("modloop"):
+                        is_alpine_overlay = True
+
                     tried_squashfs.append(sqfs_path.name)
                     cmd_exfat = [str(tool_7z), "e", str(sqfs_path), f"-o{modules_dir}", "*exfat.ko*", "-r", "-y"]
                     proc_exfat = subprocess.run(cmd_exfat, capture_output=True, text=True)
@@ -373,7 +652,7 @@ class InitramfsOverlayGenerator:
 
                     found_now = [f for f in modules_dir.glob("*exfat.ko*") if f.is_file()]
                     if found_now:
-                        # Also extract supporting NLS modules from the same SquashFS layer
+                        # Also extract supporting NLS modules and module dependency indices from the same SquashFS layer
                         cmd_nls = [
                             str(tool_7z),
                             "e",
@@ -383,6 +662,8 @@ class InitramfsOverlayGenerator:
                             "*nls_iso8859-1.ko*",
                             "*nls_cp437.ko*",
                             "*nls_ascii.ko*",
+                            "*modules.dep*",
+                            "*modules.alias*",
                             "-r",
                             "-y",
                         ]
@@ -398,10 +679,11 @@ class InitramfsOverlayGenerator:
                     if exfat_files:
                         break
 
-                # Clean up any remaining .squashfs files in sqfs_dir before next pattern
-                for rem in sqfs_dir.glob("*.squashfs"):
+                # Clean up any remaining archive files in sqfs_dir before next pattern
+                for rem in sqfs_dir.iterdir():
                     try:
-                        rem.unlink()
+                        if rem.is_file():
+                            rem.unlink()
                     except OSError:
                         pass
 
@@ -410,8 +692,8 @@ class InitramfsOverlayGenerator:
 
             if not tried_squashfs:
                 raise OverlayGenerationError(
-                    f"No Live SquashFS image (filesystem.squashfs / minimal.squashfs) found inside ISO '{iso_p.name}'. "
-                    f"{last_sq_err}".strip()
+                    f"No Live SquashFS or modloop image (filesystem.squashfs / minimal.squashfs / modloop-*) "
+                    f"found inside ISO '{iso_p.name}'. {last_sq_err}".strip()
                 )
 
             if not exfat_files:
@@ -442,7 +724,13 @@ class InitramfsOverlayGenerator:
                 signer_str = mod_info.signer or "Unknown"
                 if not any(
                     trusted in signer_str
-                    for trusted in ("Canonical", "Ubuntu", "Build time autogenerated kernel key")
+                    for trusted in (
+                        "Canonical",
+                        "Ubuntu",
+                        "Alpine Linux kernel key",
+                        "Alpine",
+                        "Build time autogenerated kernel key",
+                    )
                 ):
                     warnings.append(f"Module signer is not recognized ({signer_str}).")
 
@@ -456,7 +744,7 @@ class InitramfsOverlayGenerator:
 
             # 7. Assemble CPIO archive entries
             # Use usr/lib/modules/<kver>/... so we never overwrite the /lib -> usr/lib symlink
-            # on usrmerged Ubuntu initramfs archives.
+            # on usrmerged Ubuntu and Alpine initramfs archives.
             cpio_entries: List[Tuple[str, int, bytes]] = []
 
             # Directory nodes
@@ -475,26 +763,82 @@ class InitramfsOverlayGenerator:
             # Supporting NLS modules
             if supporting_mods:
                 cpio_entries.append((f"usr/lib/modules/{kernel_ver}/kernel/fs/nls", 0o040755, b""))
-                for s_name, s_bytes in supporting_mods.items():
+                for s_name, s_bytes in sorted(supporting_mods.items()):
                     cpio_entries.append((f"usr/lib/modules/{kernel_ver}/kernel/fs/nls/{s_name}", 0o100755, s_bytes))
                     extracted_names.append(s_name)
 
-            # /etc/modules and /conf/conf.d early-boot configuration
-            etc_modules_content = b"exfat\n"
-            cpio_entries.append(("etc", 0o040755, b""))
-            cpio_entries.append(("etc/modules", 0o100644, etc_modules_content))
+            if is_alpine_overlay:
+                # Include module dependency and alias metadata for Alpine's libkmod / modprobe / nlplug-findfs
+                dep_file = modules_dir / "modules.dep"
+                dep_bin_file = modules_dir / "modules.dep.bin"
+                alias_file = modules_dir / "modules.alias"
+                alias_bin_file = modules_dir / "modules.alias.bin"
 
-            cpio_entries.append(("conf", 0o040755, b""))
-            cpio_entries.append(("conf/conf.d", 0o040755, b""))
-            cpio_entries.append(("conf/conf.d/zz_mventx_exfat.conf", 0o100644, cls.INITRAMFS_CONF_HOOK))
+                if dep_file.is_file():
+                    cpio_entries.append((f"usr/lib/modules/{kernel_ver}/modules.dep", 0o100644, dep_file.read_bytes()))
+                else:
+                    synth_dep = ["kernel/fs/exfat/exfat.ko:"]
+                    for s_name in sorted(supporting_mods.keys()):
+                        synth_dep.append(f"kernel/fs/nls/{s_name}:")
+                    cpio_entries.append(
+                        (f"usr/lib/modules/{kernel_ver}/modules.dep", 0o100644, ("\n".join(synth_dep) + "\n").encode("utf-8"))
+                    )
 
-            # Early boot hooks
-            cpio_entries.append(("scripts", 0o040755, b""))
-            cpio_entries.append(("scripts/casper-premount", 0o040755, b""))
-            cpio_entries.append(("scripts/casper-premount/00_mventx_exfat", 0o100755, cls.CASPER_PREMOUNT_SCRIPT))
+                if dep_bin_file.is_file():
+                    cpio_entries.append((f"usr/lib/modules/{kernel_ver}/modules.dep.bin", 0o100644, dep_bin_file.read_bytes()))
 
-            cpio_entries.append(("scripts/init-top", 0o040755, b""))
-            cpio_entries.append(("scripts/init-top/00_mventx_exfat", 0o100755, cls.CASPER_PREMOUNT_SCRIPT))
+                if alias_file.is_file():
+                    cpio_entries.append((f"usr/lib/modules/{kernel_ver}/modules.alias", 0o100644, alias_file.read_bytes()))
+                else:
+                    cpio_entries.append((f"usr/lib/modules/{kernel_ver}/modules.alias", 0o100644, b"alias fs-exfat exfat\n"))
+
+                if alias_bin_file.is_file():
+                    cpio_entries.append((f"usr/lib/modules/{kernel_ver}/modules.alias.bin", 0o100644, alias_bin_file.read_bytes()))
+
+                cpio_entries.append(("etc", 0o040755, b""))
+                cpio_entries.append(("etc/modules", 0o100644, b"exfat\nisofs\nloop\nsquashfs\n"))
+
+                # Extract stock usr/sbin/nlplug-findfs from the matching Alpine initramfs if present
+                initrd_extract_dir = temp_workspace / "initrd_extract"
+                initrd_extract_dir.mkdir(parents=True, exist_ok=True)
+                initrd_pattern = f"*initramfs-{flavour_hint}" if flavour_hint else "*initramfs*"
+                subprocess.run(
+                    [str(tool_7z), "e", str(iso_p), f"-o{initrd_extract_dir}", initrd_pattern, "-r", "-y"],
+                    check=False,
+                    capture_output=True,
+                )
+                initrd_candidates = sorted(initrd_extract_dir.glob("*initramfs*"))
+                nlplug_real_bytes: Optional[bytes] = None
+                if initrd_candidates:
+                    nlplug_real_bytes = cls.extract_file_from_initramfs(
+                        initrd_candidates[0],
+                        ("usr/sbin/nlplug-findfs", "sbin/nlplug-findfs"),
+                    )
+
+                cpio_entries.append(("usr/sbin", 0o040755, b""))
+                cpio_entries.append(("usr/sbin/mdev", 0o100755, cls.ALPINE_MDEV_HOOK))
+                if nlplug_real_bytes:
+                    cpio_entries.append(("usr/sbin/nlplug-findfs.real", 0o100755, nlplug_real_bytes))
+                    cpio_entries.append(("usr/sbin/nlplug-findfs", 0o100755, cls.ALPINE_NLPLUG_WRAPPER))
+                else:
+                    cpio_entries.append(("usr/sbin/mventx-alpine-mount", 0o100755, cls.ALPINE_NLPLUG_WRAPPER))
+            else:
+                # Ubuntu / Casper early-boot configuration and hooks
+                etc_modules_content = b"exfat\n"
+                cpio_entries.append(("etc", 0o040755, b""))
+                cpio_entries.append(("etc/modules", 0o100644, etc_modules_content))
+
+                cpio_entries.append(("conf", 0o040755, b""))
+                cpio_entries.append(("conf/conf.d", 0o040755, b""))
+                cpio_entries.append(("conf/conf.d/zz_mventx_exfat.conf", 0o100644, cls.INITRAMFS_CONF_HOOK))
+
+                # Early boot hooks
+                cpio_entries.append(("scripts", 0o040755, b""))
+                cpio_entries.append(("scripts/casper-premount", 0o040755, b""))
+                cpio_entries.append(("scripts/casper-premount/00_mventx_exfat", 0o100755, cls.CASPER_PREMOUNT_SCRIPT))
+
+                cpio_entries.append(("scripts/init-top", 0o040755, b""))
+                cpio_entries.append(("scripts/init-top/00_mventx_exfat", 0o100755, cls.CASPER_PREMOUNT_SCRIPT))
 
             # 8. Compile and write CPIO archive
             cpio_data = create_newc_cpio(cpio_entries)

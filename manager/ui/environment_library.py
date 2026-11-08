@@ -97,7 +97,7 @@ class EnvironmentDetailDialog(QDialog):
 
         # Initramfs Overlay Status & Boot Support Repair
         ov_status = self.iso_service.get_overlay_status(env)
-        self.ov_req_lbl = QLabel("Yes (Casper exFAT Boot Support)" if ov_status.requires_overlay else "No")
+        self.ov_req_lbl = QLabel("Yes (Dynamic exFAT Boot Support)" if ov_status.requires_overlay else "No")
         self.ov_req_lbl.setStyleSheet("color: #e5e7eb; font-weight: 500;")
         form.addRow("Requires Initramfs Overlay:", self.ov_req_lbl)
 
@@ -159,7 +159,7 @@ class EnvironmentDetailDialog(QDialog):
 
     def _refresh_overlay_display(self) -> None:
         ov_status = self.iso_service.get_overlay_status(self.env)
-        self.ov_req_lbl.setText("Yes (Casper exFAT Boot Support)" if ov_status.requires_overlay else "No")
+        self.ov_req_lbl.setText("Yes (Dynamic exFAT Boot Support)" if ov_status.requires_overlay else "No")
         self.ov_exists_lbl.setText("Yes" if ov_status.overlay_exists else "No")
         self.ov_regen_lbl.setText("Yes" if ov_status.needs_regeneration else "No")
         self.ov_regen_lbl.setStyleSheet(

@@ -145,8 +145,9 @@ class TestLinuxBootRecipes(unittest.TestCase):
             volume_id="Fedora-WS-40",
         )
         self.assertIn("root=live:CDLABEL=Fedora-WS-40", args)
-        self.assertIn("iso-scan.filename=/ISO/fedora.iso", args)
+        self.assertIn("iso-scan/filename=/ISO/fedora.iso", args)
         self.assertIn("rd.live.image", args)
+        self.assertIn("rd.driver.pre=exfat", args)
 
     def test_opensuse_argument_formatting(self):
         """Verify openSUSE recipe argument replacement."""
@@ -155,7 +156,7 @@ class TestLinuxBootRecipes(unittest.TestCase):
             volume_id="openSUSE_Live",
         )
         self.assertIn("root=live:CDLABEL=openSUSE_Live", args)
-        self.assertIn("iso-scan.filename=/ISO/openSUSE.iso", args)
+        self.assertIn("iso-scan/filename=/ISO/openSUSE.iso", args)
         self.assertIn("rd.live.image", args)
 
     def test_mx_linux_argument_formatting(self):
@@ -168,11 +169,17 @@ class TestLinuxBootRecipes(unittest.TestCase):
 
     def test_alpine_argument_formatting(self):
         """Verify Alpine Linux recipe argument replacement."""
-        args = RECIPE_ALPINE.format_args(
+        args_lts = RECIPE_ALPINE.format_args(
             iso_path="/ISO/alpine.iso",
         )
-        self.assertIn("modloop=/boot/modloop-virt", args)
-        self.assertIn("modules=loop,squashfs,sd-mod,usb-storage", args)
+        self.assertIn("modloop=/boot/modloop-lts", args_lts)
+        self.assertIn("modules=loop,squashfs,sd-mod,usb-storage,exfat", args_lts)
+
+        args_virt = RECIPE_ALPINE.format_args(
+            iso_path="/ISO/alpine.iso",
+            kernel_path="/boot/vmlinuz-virt",
+        )
+        self.assertIn("modloop=/boot/modloop-virt", args_virt)
 
     def test_systemrescue_argument_formatting(self):
         """Verify SystemRescue recipe argument replacement."""

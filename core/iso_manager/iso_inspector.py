@@ -164,7 +164,7 @@ class ISOInspector:
                         discovered_files[p] = (lba, length)
 
                 # Scan up to 3 directory tiers for distribution structures
-                tier1_candidates = ["/casper", "/live", "/boot", "/arch", "/images", "/isolinux", "/antix", "/sysrescue"]
+                tier1_candidates = ["/casper", "/live", "/boot", "/arch", "/images", "/isolinux", "/antix", "/sysrescue", "/liveos", "/efi"]
                 for d in list(discovered_dirs.keys()):
                     if any(d.startswith(c) for c in tier1_candidates):
                         lba, length = discovered_dirs[d]
@@ -176,7 +176,7 @@ class ISOInspector:
                             else:
                                 discovered_files[sp] = (slba, slen)
 
-                tier2_candidates = ["/arch/boot", "/images/pxeboot", "/boot/grub", "/boot/x86_64", "/sysrescue/boot"]
+                tier2_candidates = ["/arch/boot", "/images/pxeboot", "/boot/grub", "/boot/x86_64", "/sysrescue/boot", "/efi/fedora", "/efi/boot"]
                 for d in list(discovered_dirs.keys()):
                     if d in tier2_candidates or d.startswith("/casper/"):
                         lba, length = discovered_dirs[d]
@@ -313,20 +313,46 @@ class ISOInspector:
                 kernel_path = arch_kernels[0] if arch_kernels else "/arch/boot/x86_64/vmlinuz-linux"
                 initrd_path = arch_initrds[0] if arch_initrds else "/arch/boot/x86_64/initramfs-linux.img"
 
-        # 4. openSUSE (Kiwi / Dracut Live)
+        # 4. openSUSE vs Fedora Dracut with /boot/x86_64/loader/
         if not recipe:
-            suse_kernels = [f for f in files_list if f.startswith("/boot/x86_64/loader/linux")]
-            suse_initrds = [f for f in files_list if f.startswith("/boot/x86_64/loader/initrd")]
-            if suse_kernels and suse_initrds:
-                recipe = "opensuse"
-                confidence = "high"
-                kernel_path = suse_kernels[0]
-                initrd_path = suse_initrds[0]
+            loader_kernels = [f for f in files_list if f.startswith("/boot/x86_64/loader/linux")]
+            loader_initrds = [f for f in files_list if f.startswith("/boot/x86_64/loader/initrd")]
+            if loader_kernels and loader_initrds:
+                vol_str = (vol_id or "").lower()
+                pub_str = (pub_id or "").lower()
+                fn_str = self.iso_path.name.lower()
+                is_fedora = (
+                    "/liveos" in dirs_list
+                    or any(d.startswith("/liveos") for d in dirs_list)
+                    or "/efi/fedora" in dirs_list
+                    or any(d.startswith("/efi/fedora") for d in dirs_list)
+                    or any(k in vol_str for k in ("fedora", "rhel", "centos", "rocky", "alma"))
+                    or any(k in pub_str for k in ("fedora", "red hat"))
+                    or any(k in fn_str for k in ("fedora", "rhel", "centos", "rocky", "alma"))
+                )
+                if is_fedora:
+                    recipe = "dracut"
+                    confidence = "high"
+                    kernel_path = loader_kernels[0]
+                    initrd_path = loader_initrds[0]
+                else:
+                    recipe = "opensuse"
+                    confidence = "high"
+                    kernel_path = loader_kernels[0]
+                    initrd_path = loader_initrds[0]
             elif "/boot/x86_64/loader" in dirs_list or any(d.startswith("/boot/x86_64") for d in dirs_list):
-                recipe = "opensuse"
-                confidence = "medium"
-                kernel_path = suse_kernels[0] if suse_kernels else "/boot/x86_64/loader/linux"
-                initrd_path = suse_initrds[0] if suse_initrds else "/boot/x86_64/loader/initrd"
+                vol_str = (vol_id or "").lower()
+                fn_str = self.iso_path.name.lower()
+                if "/liveos" in dirs_list or "/efi/fedora" in dirs_list or "fedora" in vol_str or "fedora" in fn_str:
+                    recipe = "dracut"
+                    confidence = "medium"
+                    kernel_path = loader_kernels[0] if loader_kernels else "/boot/x86_64/loader/linux"
+                    initrd_path = loader_initrds[0] if loader_initrds else "/boot/x86_64/loader/initrd"
+                else:
+                    recipe = "opensuse"
+                    confidence = "medium"
+                    kernel_path = loader_kernels[0] if loader_kernels else "/boot/x86_64/loader/linux"
+                    initrd_path = loader_initrds[0] if loader_initrds else "/boot/x86_64/loader/initrd"
 
         # 5. MX Linux / antiX
         if not recipe:
@@ -357,24 +383,63 @@ class ISOInspector:
             if (alpine_modloops or "/apks" in dirs_list) and alpine_kernels and alpine_initrds:
                 recipe = "alpine"
                 confidence = "high"
-                kernel_path = alpine_kernels[0]
-                initrd_path = alpine_initrds[0]
+                # Match kernel, initramfs, and modloop by flavour (e.g. -lts, -virt)
+                matched_pair: Optional[Tuple[str, str]] = None
+                preferred_flavours = ["lts", "virt"]
+                for k_cand in alpine_kernels:
+                    k_base = k_cand.rsplit("/", 1)[-1]
+                    flav = ""
+                    if "-" in k_base:
+                        flav = k_base.split("-", 1)[1]
+                    elif "_" in k_base:
+                        flav = k_base.split("_", 1)[1]
+                    if flav and flav not in preferred_flavours:
+                        preferred_flavours.append(flav)
+
+                for flav in preferred_flavours:
+                    k_match = [f for f in alpine_kernels if f.endswith(f"-{flav}") or f.endswith(f"_{flav}")]
+                    i_match = [f for f in alpine_initrds if f.endswith(f"-{flav}") or f.endswith(f"_{flav}")]
+                    m_match = [f for f in alpine_modloops if f.endswith(f"-{flav}") or f.endswith(f"_{flav}")]
+                    if k_match and i_match and (m_match or not alpine_modloops):
+                        matched_pair = (k_match[0], i_match[0])
+                        break
+
+                if not matched_pair:
+                    for flav in preferred_flavours:
+                        k_match = [f for f in alpine_kernels if f.endswith(f"-{flav}") or f.endswith(f"_{flav}")]
+                        i_match = [f for f in alpine_initrds if f.endswith(f"-{flav}") or f.endswith(f"_{flav}")]
+                        if k_match and i_match:
+                            matched_pair = (k_match[0], i_match[0])
+                            break
+
+                if matched_pair:
+                    kernel_path, initrd_path = matched_pair
+                else:
+                    kernel_path = alpine_kernels[0]
+                    initrd_path = alpine_initrds[0]
             elif "/apks" in dirs_list or (alpine_kernels and alpine_modloops):
                 recipe = "alpine"
                 confidence = "medium"
-                kernel_path = alpine_kernels[0] if alpine_kernels else "/boot/vmlinuz-virt"
-                initrd_path = alpine_initrds[0] if alpine_initrds else "/boot/initramfs-virt"
+                default_flav = "virt" if "virt" in self.iso_path.name.lower() else "lts"
+                kernel_path = alpine_kernels[0] if alpine_kernels else f"/boot/vmlinuz-{default_flav}"
+                initrd_path = alpine_initrds[0] if alpine_initrds else f"/boot/initramfs-{default_flav}"
 
         # 7. Dracut (Fedora / RHEL / CentOS / Rocky / Alma)
         if not recipe:
-            dracut_kernels = [f for f in files_list if f.startswith("/images/pxeboot/vmlinuz")]
-            dracut_initrds = [f for f in files_list if f.startswith("/images/pxeboot/initrd")]
+            dracut_kernels = [
+                f for f in files_list
+                if f.startswith("/images/pxeboot/vmlinuz") or f.startswith("/boot/x86_64/loader/linux")
+            ]
+            dracut_initrds = [
+                f for f in files_list
+                if f.startswith("/images/pxeboot/initrd") or f.startswith("/boot/x86_64/loader/initrd")
+            ]
             if dracut_kernels and dracut_initrds:
                 recipe = "dracut"
                 confidence = "high"
                 kernel_path = dracut_kernels[0]
                 initrd_path = dracut_initrds[0]
-            elif "/images/pxeboot" in dirs_list:
+            elif "/images/pxeboot" in dirs_list or "/liveos" in dirs_list:
                 recipe = "dracut"
                 confidence = "medium"
                 kernel_path = dracut_kernels[0] if dracut_kernels else "/images/pxeboot/vmlinuz"
@@ -452,8 +517,9 @@ class ISOInspector:
                 elif "alpine" in combined_hints:
                     recipe = "alpine"
                     confidence = "medium"
-                    kernel_path = "/boot/vmlinuz-virt"
-                    initrd_path = "/boot/initramfs-virt"
+                    default_flav = "virt" if "virt" in combined_hints else "lts"
+                    kernel_path = f"/boot/vmlinuz-{default_flav}"
+                    initrd_path = f"/boot/initramfs-{default_flav}"
                     warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
                 elif "fedora" in combined_hints or "rhel" in combined_hints or "rocky" in combined_hints or "alma" in combined_hints:
                     recipe = "dracut"

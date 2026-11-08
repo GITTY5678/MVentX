@@ -7,8 +7,65 @@ initramfs locations, and command-line argument generators for GRUB 2 loopback ex
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
+
+
+def infer_alpine_modloop_path(
+    kernel_path: Optional[str] = None,
+    initrd_path: Optional[str] = None,
+) -> str:
+    """Infer the matching Alpine /boot/modloop-<flavour> path from kernel or initramfs path."""
+    for candidate in (kernel_path, initrd_path):
+        if not candidate:
+            continue
+        norm = candidate.strip().replace("\\", "/")
+        basename = norm.rsplit("/", 1)[-1]
+        m = re.match(r"^(?:vmlinuz|initramfs|initrd)[-_]([a-zA-Z0-9._-]+)$", basename, re.IGNORECASE)
+        if m:
+            flavour = m.group(1)
+            prefix_dir = norm.rsplit("/", 1)[0] if "/" in norm else "/boot"
+            if not prefix_dir.startswith("/"):
+                prefix_dir = "/" + prefix_dir
+            return f"{prefix_dir}/modloop-{flavour}"
+    return "/boot/modloop-lts"
+
+
+def infer_dracut_volume_id(
+    iso_path: str,
+    volume_id: Optional[str] = None,
+) -> str:
+    """Infer the ISO Volume ID (CDLABEL) for Dracut live loopback booting."""
+    if volume_id and volume_id.strip() and volume_id.strip() != "MVX_DATA":
+        return volume_id.strip()
+
+    # Try reading directly from the ISO file if it exists on disk
+    try:
+        norm = iso_path.strip().replace("\\", "/")
+        for cand in (norm, norm.lstrip("/"), f"F:/{norm.lstrip('/')}", f"F:{norm}"):
+            p = Path(cand)
+            if p.is_file() and p.stat().st_size >= 32768 + 2048:
+                with open(p, "rb") as f:
+                    f.seek(16 * 2048)
+                    pvd = f.read(2048)
+                    if len(pvd) >= 72 and pvd[1:6] == b"CD001":
+                        vol_raw = pvd[40:72].decode("latin-1", errors="replace").strip()
+                        if vol_raw:
+                            return vol_raw
+                break
+    except Exception:
+        pass
+
+    # Infer from ISO filename
+    basename = iso_path.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    m_fed = re.search(r"Fedora-([A-Za-z0-9]+).*?-(\d{2})(?:[-.]|$)", basename, re.IGNORECASE)
+    if m_fed:
+        ed, ver = m_fed.group(1), m_fed.group(2)
+        ed_abbr = {"workstation": "WS", "server": "S", "silverblue": "SB"}.get(ed.lower(), ed)
+        return f"Fedora-{ed_abbr}-Live-{ver}"
+
+    return volume_id.strip() if (volume_id and volume_id.strip()) else "Fedora-WS-Live-45"
 
 
 @dataclass(frozen=True)
@@ -21,16 +78,29 @@ class LinuxBootRecipe:
     default_args: str
     description: str
 
-    def format_args(self, iso_path: str, custom_args: Optional[str] = None, volume_id: Optional[str] = None) -> str:
+    def format_args(
+        self,
+        iso_path: str,
+        custom_args: Optional[str] = None,
+        volume_id: Optional[str] = None,
+        kernel_path: Optional[str] = None,
+        initrd_path: Optional[str] = None,
+    ) -> str:
         """Format the kernel command-line arguments string."""
         vol = volume_id or "MVX_DATA"
         # Quote iso_path if it contains spaces so Linux kernel cmdline does not split arguments
         safe_iso_path = f'"{iso_path}"' if " " in iso_path and not iso_path.startswith('"') else iso_path
+        modloop_path = infer_alpine_modloop_path(
+            kernel_path or self.kernel_path,
+            initrd_path or self.initrd_path,
+        )
+        iso_vol_id = infer_dracut_volume_id(iso_path, volume_id)
         args = (
             self.default_args
             .replace("${iso_path}", safe_iso_path)
             .replace("${vol_id}", vol)
-            .replace("${iso_vol_id}", vol)
+            .replace("${iso_vol_id}", iso_vol_id)
+            .replace("${modloop_path}", modloop_path)
         )
         if custom_args:
             args = f"{args} {custom_args}".strip()
@@ -64,7 +134,7 @@ RECIPE_DRACUT = LinuxBootRecipe(
     name="Fedora / RHEL Dracut Live",
     kernel_path="/images/pxeboot/vmlinuz",
     initrd_path="/images/pxeboot/initrd.img",
-    default_args="root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path} rd.live.image quiet",
+    default_args="root=live:CDLABEL=${iso_vol_id} iso-scan/filename=${iso_path} rd.live.image rd.driver.pre=exfat quiet",
     description="Fedora, CentOS, RHEL, Rocky Linux, AlmaLinux, and derivatives using Dracut live module",
 )
 
@@ -82,7 +152,7 @@ RECIPE_OPENSUSE = LinuxBootRecipe(
     name="openSUSE Leap / Tumbleweed Live",
     kernel_path="/boot/x86_64/loader/linux",
     initrd_path="/boot/x86_64/loader/initrd",
-    default_args="root=live:CDLABEL=${vol_id} iso-scan.filename=${iso_path} rd.live.image splash=silent quiet",
+    default_args="root=live:CDLABEL=${iso_vol_id} iso-scan/filename=${iso_path} rd.live.image splash=silent quiet",
     description="openSUSE Leap and Tumbleweed Live images using Kiwi/Dracut initramfs",
 )
 
@@ -98,9 +168,9 @@ RECIPE_MX_LINUX = LinuxBootRecipe(
 RECIPE_ALPINE = LinuxBootRecipe(
     recipe_id="alpine",
     name="Alpine Linux Virt / Standard",
-    kernel_path="/boot/vmlinuz-virt",
-    initrd_path="/boot/initramfs-virt",
-    default_args="modules=loop,squashfs,sd-mod,usb-storage modloop=/boot/modloop-virt quiet",
+    kernel_path="/boot/vmlinuz-lts",
+    initrd_path="/boot/initramfs-lts",
+    default_args="iso-scan/filename=${iso_path} modules=loop,squashfs,sd-mod,usb-storage,exfat modloop=${modloop_path} quiet",
     description="Alpine Linux installation and live environments using modloop",
 )
 
@@ -359,7 +429,13 @@ def generate_loopback_boot_commands(
     i_path = raw_i_path if raw_i_path.startswith("/") else "/" + raw_i_path
 
     clean_custom_args = custom_args.replace("\r", " ").replace("\n", " ").strip() if custom_args else None
-    k_args = recipe.format_args(norm_iso_path, custom_args=clean_custom_args, volume_id=volume_id)
+    k_args = recipe.format_args(
+        norm_iso_path,
+        custom_args=clean_custom_args,
+        volume_id=volume_id,
+        kernel_path=k_path,
+        initrd_path=i_path,
+    )
 
     commands = [
         f'    if [ -z "${{{data_dev_var}}}" ]; then',

@@ -120,6 +120,10 @@
           "type": ["string", "null"],
           "description": "Optional relative path to supplementary initramfs overlay archive on boot partition"
         },
+        "volume_id": {
+          "type": ["string", "null"],
+          "description": "Optional ISO 9660 volume label/ID for media discovery (e.g. Fedora-WS-Live-45)"
+        },
         "target_path": {
           "type": ["string", "null"],
           "description": "Target EFI or bootloader path if type is chainload"

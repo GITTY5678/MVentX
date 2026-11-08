@@ -79,6 +79,7 @@ class EnvironmentRecord:
     kernel_path: Optional[str] = None
     initrd_path: Optional[str] = None
     overlay_path: Optional[str] = None
+    volume_id: Optional[str] = None
     checksum: Optional[Dict[str, str]] = None
     file_size_bytes: Optional[int] = None
     registered_at: Optional[str] = None
@@ -109,6 +110,8 @@ class EnvironmentRecord:
             data["initrd_path"] = self.initrd_path
         if self.overlay_path is not None:
             data["overlay_path"] = self.overlay_path
+        if self.volume_id is not None:
+            data["volume_id"] = self.volume_id
         if self.target_path is not None:
             data["target_path"] = self.target_path
         if self.target_hint is not None:
@@ -144,6 +147,7 @@ class EnvironmentRecord:
             kernel_path=data.get("kernel_path"),
             initrd_path=data.get("initrd_path"),
             overlay_path=data.get("overlay_path"),
+            volume_id=data.get("volume_id"),
             target_path=data.get("target_path"),
             target_hint=data.get("target_hint"),
             checksum=data.get("checksum"),
@@ -187,6 +191,22 @@ class StorageMetrics:
 
 class ISORegistrationManager:
     """Manages the lifecycle of registered boot environments on the MVentX USB drive."""
+
+    OVERLAY_REQUIRED_RECIPES = {
+        "casper",
+        "linux_casper",
+        "ubuntu",
+        "mint",
+        "alpine",
+        "alpine_linux",
+        "linux_alpine",
+    }
+
+    @classmethod
+    def _is_overlay_required(cls, recipe: Optional[str], boot_method: Optional[str]) -> bool:
+        r = (recipe or "").strip().lower()
+        m = (boot_method or "").strip().lower()
+        return r in cls.OVERLAY_REQUIRED_RECIPES or m in cls.OVERLAY_REQUIRED_RECIPES
 
     def __init__(
         self,
@@ -462,9 +482,9 @@ class ISORegistrationManager:
         final_kernel_path = kernel_path or meta.discovered_kernel_path
         final_initrd_path = initrd_path or meta.discovered_initrd_path
 
-        # 8. Check if dynamic initramfs overlay is needed (e.g. Ubuntu / Casper boots from exFAT MVX_DATA)
+        # 8. Check if dynamic initramfs overlay is needed (e.g. Ubuntu Casper or Alpine Linux boots from exFAT MVX_DATA)
         overlay_rel_path: Optional[str] = None
-        if recipe == "casper" or chosen_boot_method == "casper":
+        if self._is_overlay_required(recipe, chosen_boot_method):
             from core.iso_manager.overlay_generator import InitramfsOverlayGenerator
             should_generate = False
             if generate_overlay is True:
@@ -483,6 +503,9 @@ class ISORegistrationManager:
                         iso_path=abs_iso_path,
                         output_cpio_path=target_overlay_file,
                         target_kernel_version=None,
+                        recipe=recipe,
+                        kernel_path=final_kernel_path,
+                        initrd_path=final_initrd_path,
                     )
                     if res.success:
                         overlay_rel_path = f"boot/mventx/overlays/{overlay_filename}"
@@ -513,6 +536,7 @@ class ISORegistrationManager:
             kernel_path=final_kernel_path,
             initrd_path=final_initrd_path,
             overlay_path=overlay_rel_path,
+            volume_id=meta.volume_identifier,
             checksum=meta.checksum,
             file_size_bytes=file_size,
             registered_at=meta.registered_at,
@@ -691,9 +715,9 @@ class ISORegistrationManager:
         overlay_cleanup_id: Optional[str] = None
         new_recipe = target_env.get("recipe")
         new_method = target_env.get("boot_method")
-        is_casper = (new_recipe == "casper" or new_method == "casper")
+        needs_ov = self._is_overlay_required(new_recipe, new_method)
 
-        if is_casper:
+        if needs_ov:
             if regenerate_overlay or not target_env.get("overlay_path"):
                 rel_iso = target_env.get("iso_path")
                 if rel_iso:
@@ -710,6 +734,9 @@ class ISORegistrationManager:
                             res = InitramfsOverlayGenerator.generate_exfat_overlay(
                                 iso_path=abs_iso,
                                 output_cpio_path=overlay_file,
+                                recipe=new_recipe or new_method,
+                                kernel_path=target_env.get("kernel_path"),
+                                initrd_path=target_env.get("initrd_path"),
                             )
                             if res.success:
                                 target_env["overlay_path"] = f"boot/mventx/overlays/{env_id}.cpio"
@@ -745,7 +772,7 @@ class ISORegistrationManager:
             env = env_or_id
 
         requires_overlay = bool(
-            env.type == "iso" and (env.recipe == "casper" or env.boot_method == "casper")
+            env.type == "iso" and self._is_overlay_required(env.recipe, env.boot_method)
         )
         if not requires_overlay:
             return OverlayStatus(
@@ -776,7 +803,7 @@ class ISORegistrationManager:
                 state="missing",
                 status_label="Required • Missing (Needs Regen)",
                 detail_message=(
-                    "Requires supplementary exFAT initramfs overlay for Casper boot, "
+                    f"Requires supplementary exFAT initramfs overlay for {env.recipe or env.boot_method} boot, "
                     "but no overlay is configured. Use 'Repair / Regenerate' to build it."
                 ),
             )
@@ -923,14 +950,14 @@ class ISORegistrationManager:
             if not abs_iso.is_file():
                 raise FileNotFoundError(f"Registered ISO file not found on MVX_DATA: {rel_iso}")
 
-        is_casper = (
-            target_env.get("recipe") == "casper" or target_env.get("boot_method") == "casper"
+        needs_ov = self._is_overlay_required(
+            target_env.get("recipe"), target_env.get("boot_method")
         )
 
         prior_overlay_bytes: Optional[bytes] = None
         target_overlay_file: Optional[Path] = None
 
-        if is_casper and abs_iso:
+        if needs_ov and abs_iso:
             overlays_dir = self.storage_manager.overlays_directory_path
             if not overlays_dir:
                 raise RegistrationError("MVX_BOOT partition is not mounted; cannot write initramfs overlay.")
@@ -952,6 +979,9 @@ class ISORegistrationManager:
                 res = InitramfsOverlayGenerator.generate_exfat_overlay(
                     iso_path=abs_iso,
                     output_cpio_path=target_overlay_file,
+                    recipe=target_env.get("recipe") or target_env.get("boot_method"),
+                    kernel_path=target_env.get("kernel_path"),
+                    initrd_path=target_env.get("initrd_path"),
                 )
                 if not res.success:
                     raise RegistrationError("; ".join(res.errors) or "Overlay generation reported failure.")
@@ -976,7 +1006,7 @@ class ISORegistrationManager:
         try:
             self._save_and_sync_with_rollback(
                 config,
-                overlay_to_cleanup_on_error=env_id if (is_casper and prior_overlay_bytes is None) else None,
+                overlay_to_cleanup_on_error=env_id if (needs_ov and prior_overlay_bytes is None) else None,
             )
         except Exception:
             if target_overlay_file and prior_overlay_bytes is not None:

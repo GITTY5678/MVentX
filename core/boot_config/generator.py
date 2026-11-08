@@ -245,6 +245,10 @@ class GrubMenuGenerator:
             if "overlay_path" in entry and entry["overlay_path"] is not None:
                 sanitize_path(entry["overlay_path"])
 
+            if "volume_id" in entry and entry["volume_id"] is not None:
+                if not isinstance(entry["volume_id"], str):
+                    raise ConfigValidationError(f"Environment '{env_id}' field 'volume_id' must be a string")
+
     def generate_menu_script(self, config_data: Dict[str, Any]) -> str:
         """Generate full GRUB 2 configuration script deterministically from configuration.
 
@@ -356,6 +360,17 @@ class GrubMenuGenerator:
                     c_args = sanitize_custom_args(entry.get("custom_args"))
                     iso_clean = sanitize_path(entry.get("iso_path"))
                     overlay_clean = sanitize_path(entry.get("overlay_path")) if entry.get("overlay_path") else None
+                    vol_id = entry.get("volume_id")
+                    if not vol_id and self.data_dir:
+                        meta_file = self.data_dir / "metadata" / f"{env_id}.json"
+                        if meta_file.is_file():
+                            try:
+                                with open(meta_file, "r", encoding="utf-8") as mf:
+                                    mdata = json.load(mf)
+                                    vol_id = mdata.get("volume_identifier")
+                            except Exception:
+                                pass
+
                     if iso_clean:
                         boot_cmds = generate_loopback_boot_commands(
                             recipe=recipe,
@@ -363,6 +378,7 @@ class GrubMenuGenerator:
                             kernel_path_override=k_override,
                             initrd_path_override=i_override,
                             custom_args=c_args,
+                            volume_id=vol_id,
                             overlay_path=overlay_clean,
                         )
                         lines.extend(boot_cmds)

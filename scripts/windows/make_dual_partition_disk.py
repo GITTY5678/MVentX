@@ -402,29 +402,39 @@ class ExFATBuilder:
         # Sectors 24+: FAT table
         self.fat_offset = 24
         est_clusters = (self.total_sectors - 512) // self.sectors_per_cluster
-        self.fat_length = math.ceil((est_clusters * 4) / self.bytes_per_sector)
+        self.fat_length = math.ceil(((est_clusters + 2) * 4) / self.bytes_per_sector)
 
-        # Cluster heap starts aligned at sector 512 (256 KB)
-        self.cluster_heap_offset = 512
+        # Cluster heap starts aligned after FAT table (at least sector 512)
+        min_heap_offset = self.fat_offset + self.fat_length
+        self.cluster_heap_offset = max(512, ((min_heap_offset + 63) // 64) * 64)
         self.cluster_count = (self.total_sectors - self.cluster_heap_offset) // self.sectors_per_cluster
 
         self.fs_buffer = bytearray(size_bytes)
 
         # Clusters:
-        # Cluster 2: Allocation Bitmap
-        # Cluster 3: Up-Case Table (131072 bytes = 32 clusters, clusters 3 to 34)
-        # Cluster 35: Root Directory
+        # Cluster 2..N: Allocation Bitmap
+        # Next 32 clusters: Up-Case Table (131072 bytes = 32 clusters)
+        # Following cluster: Root Directory
+        bitmap_bytes_len = math.ceil(self.cluster_count / 8)
+        self.bitmap_clusters_count = max(1, math.ceil(bitmap_bytes_len / self.cluster_size))
         self.bitmap_cluster = 2
-        self.upcase_cluster = 3
+        self.upcase_cluster = self.bitmap_cluster + self.bitmap_clusters_count
         self.upcase_clusters_count = 32  # 128 KB
-        self.root_dir_cluster = 35
+        self.root_dir_cluster = self.upcase_cluster + self.upcase_clusters_count
 
-        self.allocated_clusters = 36  # Next free cluster for user files
+        self.allocated_clusters = self.root_dir_cluster + 1  # Next free cluster for user files
 
         # FAT table initialized with 1 FAT
         self.fat: List[int] = [0] * (self.cluster_count + 2)
         self.fat[0] = 0xFFFFFFF8  # Media
         self.fat[1] = 0xFFFFFFFF  # End
+        for c in range(self.bitmap_cluster, self.bitmap_cluster + self.bitmap_clusters_count - 1):
+            self.fat[c] = c + 1
+        self.fat[self.bitmap_cluster + self.bitmap_clusters_count - 1] = 0xFFFFFFFF
+        for c in range(self.upcase_cluster, self.upcase_cluster + self.upcase_clusters_count - 1):
+            self.fat[c] = c + 1
+        self.fat[self.upcase_cluster + self.upcase_clusters_count - 1] = 0xFFFFFFFF
+        self.fat[self.root_dir_cluster] = 0xFFFFFFFF
 
         self._build_upcase_table()
         self._write_boot_regions()
@@ -513,6 +523,10 @@ class ExFATBuilder:
         entries[0] = 0x85
         entries[1] = secondary_count  # SecondaryCount
         entries[4] = 0x10 if is_dir else 0x20  # FileAttributes
+        ts = (46 << 25) | (1 << 21) | (1 << 16)  # 2026-01-01 00:00:00
+        struct.pack_into("<I", entries, 8, ts)
+        struct.pack_into("<I", entries, 12, ts)
+        struct.pack_into("<I", entries, 16, ts)
 
         # 2. Stream Extension Entry (0xC0)
         stream_offset = 32
@@ -667,6 +681,12 @@ class ExFATBuilder:
             self.cluster_heap_offset + (self.bitmap_cluster - 2) * self.sectors_per_cluster
         ) * self.bytes_per_sector
         self.fs_buffer[bitmap_offset : bitmap_offset + len(bitmap)] = bitmap
+
+        # Write FAT table at fat_offset
+        fat_byte_offset = self.fat_offset * self.bytes_per_sector
+        for idx, val in enumerate(self.fat):
+            if val != 0:
+                struct.pack_into("<I", self.fs_buffer, fat_byte_offset + idx * 4, val)
 
         return bytes(self.fs_buffer)
 

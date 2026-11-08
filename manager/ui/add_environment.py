@@ -329,10 +329,10 @@ class AddEnvironmentScreen(QWidget):
                     details += f"Detected Recipe: {insp_res.detected_recipe} (Confidence: {insp_res.confidence})\n"
                 if insp_res.kernel_path:
                     details += f"Discovered Kernel: {insp_res.kernel_path} | Initrd: {insp_res.initrd_path or 'None'}\n"
-                if insp_res.detected_recipe == "casper":
+                if insp_res.detected_recipe in ("casper", "alpine"):
                     details += (
-                        "Boot Support: Casper detected — Dynamic exFAT initramfs overlay will be "
-                        "generated automatically on MVX_BOOT.\n"
+                        f"Boot Support: {insp_res.detected_recipe.title()} detected — Dynamic exFAT initramfs overlay "
+                        "will be generated automatically on MVX_BOOT.\n"
                     )
                 details += f"Notice: {res.disclaimer}"
                 self.val_details_lbl.setText(details)
