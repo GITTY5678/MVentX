@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from PySide6.QtCore import QObject, Signal
 
 from core.boot_config.generator import ConfigSecurityError, ConfigValidationError
+from core.boot_config.recipes import BootMethodDescriptor, get_supported_boot_methods
 from core.iso_manager import (
     DuplicateRegistrationError,
     EnvironmentNotFoundError,
@@ -22,10 +23,12 @@ from core.iso_manager import (
     ISOValidationResult,
     ISOValidator,
     MenuSyncRollbackError,
+    OverlayStatus,
     PathTraversalError,
     RegistrationError,
     StorageMetrics,
 )
+from core.iso_manager.iso_inspector import ISOInspector, InspectionResult
 from core.storage.storage_manager import StorageManager
 from manager.services.device_service import ActiveTarget, DeviceService
 
@@ -118,6 +121,74 @@ class ISOService(QObject):
         """Validate an ISO file without registering it."""
         return ISOValidator.validate_iso(iso_path)
 
+    def inspect_iso(self, iso_path: Union[Path, str]) -> InspectionResult:
+        """Inspect ISO filesystem structure, detect recipe and locate kernel/initrd."""
+        return ISOInspector(iso_path).inspect()
+
+    @classmethod
+    def get_supported_boot_methods(cls) -> List[BootMethodDescriptor]:
+        """Return list of supported boot method descriptors from authoritative registry."""
+        return get_supported_boot_methods()
+
+    def get_overlay_status(self, env_or_id: Union[EnvironmentRecord, str]) -> OverlayStatus:
+        """Return initramfs overlay requirement, existence, and regeneration status for an environment."""
+        if not self._registration_manager:
+            return OverlayStatus(
+                requires_overlay=False,
+                overlay_exists=False,
+                needs_regeneration=False,
+                state="not_required",
+                status_label="Not Required",
+                detail_message="No active MVentX device selected.",
+            )
+        try:
+            return self._registration_manager.get_overlay_status(env_or_id)
+        except Exception as exc:
+            return OverlayStatus(
+                requires_overlay=False,
+                overlay_exists=False,
+                needs_regeneration=False,
+                state="not_required",
+                status_label="Unknown",
+                detail_message=f"Could not inspect overlay status: {exc}",
+            )
+
+    def regenerate_boot_support(
+        self,
+        env_id: str,
+        progress_callback: Optional[Any] = None,
+    ) -> Optional[EnvironmentRecord]:
+        """Regenerate or repair an environment's boot support and initramfs overlay atomically."""
+        if not self._registration_manager:
+            self.operation_failed.emit("Device Not Selected", "Please select a valid MVentX drive first.")
+            return None
+
+        try:
+            record = self._registration_manager.regenerate_boot_support(
+                env_id=env_id,
+                progress_callback=progress_callback,
+            )
+            self.operation_succeeded.emit(
+                f"Boot support and initramfs overlay repaired for '{record.display_name}'."
+            )
+            self.environments_changed.emit()
+            return record
+        except MenuSyncRollbackError as exc:
+            self.operation_failed.emit("Menu Sync Error (Rolled Back)", str(exc))
+            return None
+        except Exception as exc:
+            self.operation_failed.emit("Boot Support Repair Failed", str(exc))
+            return None
+
+    def clean_orphaned_overlays(self) -> int:
+        """Remove any orphaned *.cpio overlay archives not referenced by a registered environment."""
+        if not self._registration_manager:
+            return 0
+        try:
+            return self._registration_manager.clean_orphaned_overlays()
+        except Exception:
+            return 0
+
     # --------------------------------------------------------------------------
     # Registration & Modification Actions
     # --------------------------------------------------------------------------
@@ -126,11 +197,15 @@ class ISOService(QObject):
         self,
         iso_file: Union[Path, str],
         display_name: str,
-        boot_method: str = "linux_generic_loopback",
+        boot_method: Optional[str] = None,
         description: Optional[str] = None,
         custom_args: Optional[str] = None,
         enabled: bool = True,
         calculate_hash: bool = False,
+        recipe: Optional[str] = None,
+        kernel_path: Optional[str] = None,
+        initrd_path: Optional[str] = None,
+        generate_overlay: Optional[bool] = None,
     ) -> Optional[EnvironmentRecord]:
         """Register a new ISO environment."""
         if not self._registration_manager:
@@ -146,8 +221,17 @@ class ISOService(QObject):
                 custom_args=custom_args,
                 enabled=enabled,
                 calculate_hash=calculate_hash,
+                recipe=recipe,
+                kernel_path=kernel_path,
+                initrd_path=initrd_path,
+                generate_overlay=generate_overlay,
             )
-            self.operation_succeeded.emit(f"Successfully registered '{record.display_name}'.")
+            if record.overlay_path:
+                self.operation_succeeded.emit(
+                    f"Successfully registered '{record.display_name}' with dynamic initramfs overlay."
+                )
+            else:
+                self.operation_succeeded.emit(f"Successfully registered '{record.display_name}'.")
             self.environments_changed.emit()
             return record
         except (

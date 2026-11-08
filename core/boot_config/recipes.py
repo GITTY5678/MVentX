@@ -174,12 +174,127 @@ REGISTERED_RECIPES: Dict[str, LinuxBootRecipe] = {
     "systemrescue": RECIPE_SYSTEMRESCUE,
     "sysrescue": RECIPE_SYSTEMRESCUE,
     "linux_systemrescue": RECIPE_SYSTEMRESCUE,
+    # Compatibility aliases
+    "arch_loopback": RECIPE_ARCHISO,
+    "debian_live_loopback": RECIPE_LIVE_BOOT,
     # Generic fallback
     "generic_kernel": RECIPE_GENERIC_KERNEL,
     "generic": RECIPE_GENERIC_KERNEL,
     "linux_generic_loopback": RECIPE_GENERIC_KERNEL,
     "iso_loopback": RECIPE_GENERIC_KERNEL,
 }
+
+
+@dataclass(frozen=True)
+class BootMethodDescriptor:
+    """Describes a user-facing boot method choice and its backend recipe mapping."""
+    id: str
+    display_name: str
+    description: str
+    recipe_id: str
+    env_type: str = "iso"
+
+
+SUPPORTED_BOOT_METHODS: Dict[str, BootMethodDescriptor] = {
+    "casper": BootMethodDescriptor(
+        id="casper",
+        display_name="Ubuntu / Linux Mint (Casper)",
+        description="Live ISO loopback for Ubuntu, Linux Mint, Pop!_OS, and Casper derivatives",
+        recipe_id="casper",
+        env_type="iso",
+    ),
+    "archiso": BootMethodDescriptor(
+        id="archiso",
+        display_name="Arch Linux / Manjaro (ArchISO)",
+        description="Live ISO loopback for Arch Linux, Manjaro, and EndeavourOS via ArchISO",
+        recipe_id="archiso",
+        env_type="iso",
+    ),
+    "live_boot": BootMethodDescriptor(
+        id="live_boot",
+        display_name="Debian Live / Clonezilla (live-boot)",
+        description="Live ISO loopback for Debian Live, Clonezilla, Kali, and Rescuezilla",
+        recipe_id="live_boot",
+        env_type="iso",
+    ),
+    "dracut": BootMethodDescriptor(
+        id="dracut",
+        display_name="Fedora / RHEL / CentOS (Dracut)",
+        description="Live ISO loopback for Fedora, RHEL, CentOS, Rocky, Alma",
+        recipe_id="dracut",
+        env_type="iso",
+    ),
+    "opensuse": BootMethodDescriptor(
+        id="opensuse",
+        display_name="openSUSE Leap / Tumbleweed",
+        description="Live ISO loopback for openSUSE Kiwi/Dracut live images",
+        recipe_id="opensuse",
+        env_type="iso",
+    ),
+    "mx_linux": BootMethodDescriptor(
+        id="mx_linux",
+        display_name="MX Linux / antiX (linux-live)",
+        description="Live ISO loopback for MX Linux and antiX",
+        recipe_id="mx_linux",
+        env_type="iso",
+    ),
+    "alpine": BootMethodDescriptor(
+        id="alpine",
+        display_name="Alpine Linux (modloop)",
+        description="Live ISO loopback for Alpine Linux live/virt images",
+        recipe_id="alpine",
+        env_type="iso",
+    ),
+    "systemrescue": BootMethodDescriptor(
+        id="systemrescue",
+        display_name="SystemRescue (ArchISO derivative)",
+        description="Live ISO loopback for SystemRescue toolkit",
+        recipe_id="systemrescue",
+        env_type="iso",
+    ),
+    "linux_generic_loopback": BootMethodDescriptor(
+        id="linux_generic_loopback",
+        display_name="Generic Linux Loopback (generic_kernel)",
+        description="Standard generic Linux loopback kernel/initrd loader",
+        recipe_id="generic_kernel",
+        env_type="iso",
+    ),
+    "windows_extracted_media": BootMethodDescriptor(
+        id="windows_extracted_media",
+        display_name="Windows Installation Media (Extracted)",
+        description="Direct UEFI chainload of extracted Windows bootmgfw.efi",
+        recipe_id="",
+        env_type="windows",
+    ),
+}
+
+
+def get_supported_boot_methods() -> List[BootMethodDescriptor]:
+    """Return ordered list of supported boot methods for GUI and CLI dropdowns."""
+    return list(SUPPORTED_BOOT_METHODS.values())
+
+
+def get_boot_method_descriptor(method_id: str) -> Optional[BootMethodDescriptor]:
+    """Retrieve boot method descriptor by identifier or alias."""
+    key = method_id.strip().lower()
+    if key in SUPPORTED_BOOT_METHODS:
+        return SUPPORTED_BOOT_METHODS[key]
+    alias_map = {
+        "linux_casper": "casper",
+        "ubuntu": "casper",
+        "mint": "casper",
+        "linux_archiso": "archiso",
+        "arch_loopback": "archiso",
+        "linux_live_boot": "live_boot",
+        "debian_live_loopback": "live_boot",
+        "linux_dracut": "dracut",
+        "generic": "linux_generic_loopback",
+        "generic_kernel": "linux_generic_loopback",
+    }
+    target = alias_map.get(key)
+    if target:
+        return SUPPORTED_BOOT_METHODS.get(target)
+    return None
 
 
 def get_recipe(identifier: str) -> LinuxBootRecipe:
@@ -219,25 +334,47 @@ def generate_loopback_boot_commands(
     volume_id: Optional[str] = None,
     loop_dev: str = "loop0",
     data_dev_var: str = "mventx_data_dev",
+    overlay_path: Optional[str] = None,
+    boot_dev_var: str = "mventx_boot_dev",
 ) -> List[str]:
-    """Generate resilient GRUB 2 script commands for loopback mounting and booting a Linux ISO."""
-    # Ensure iso_path starts with /
-    norm_iso_path = "/" + iso_path.lstrip("/\\")
+    """Generate resilient GRUB 2 script commands for loopback mounting and booting a Linux ISO.
 
-    k_path = kernel_path_override or recipe.kernel_path
-    if not k_path.startswith("/"):
-        k_path = "/" + k_path
+    Guarantees that every emitted GRUB command is a single physical line with no embedded
+    CR/LF characters.
+    """
+    # Strip any accidental CR/LF and normalize slashes so commands never split across lines
+    clean_iso = iso_path.replace("\r", "").replace("\n", "").strip().replace("\\", "/")
+    norm_iso_path = "/" + clean_iso.lstrip("/")
 
-    i_path = initrd_path_override or recipe.initrd_path
-    if not i_path.startswith("/"):
-        i_path = "/" + i_path
+    if overlay_path and overlay_path.strip():
+        clean_ov = overlay_path.replace("\r", "").replace("\n", "").strip().replace("\\", "/")
+        norm_overlay_path: Optional[str] = "/" + clean_ov.lstrip("/")
+    else:
+        norm_overlay_path = None
 
-    k_args = recipe.format_args(norm_iso_path, custom_args=custom_args, volume_id=volume_id)
+    raw_k_path = (kernel_path_override or recipe.kernel_path).replace("\r", "").replace("\n", "").strip().replace("\\", "/")
+    k_path = raw_k_path if raw_k_path.startswith("/") else "/" + raw_k_path
+
+    raw_i_path = (initrd_path_override or recipe.initrd_path).replace("\r", "").replace("\n", "").strip().replace("\\", "/")
+    i_path = raw_i_path if raw_i_path.startswith("/") else "/" + raw_i_path
+
+    clean_custom_args = custom_args.replace("\r", " ").replace("\n", " ").strip() if custom_args else None
+    k_args = recipe.format_args(norm_iso_path, custom_args=clean_custom_args, volume_id=volume_id)
 
     commands = [
         f'    if [ -z "${{{data_dev_var}}}" ]; then',
         f'        search --no-floppy --label --set={data_dev_var} MVX_DATA',
         '    fi',
+    ]
+
+    if norm_overlay_path:
+        commands.extend([
+            f'    if [ -z "${{{boot_dev_var}}}" ]; then',
+            f'        search --no-floppy --label --set={boot_dev_var} MVX_BOOT',
+            '    fi',
+        ])
+
+    commands.extend([
         f'    if [ -z "${{{data_dev_var}}}" ]; then',
         '        echo ""',
         '        echo "=========================================================="',
@@ -293,12 +430,30 @@ def generate_loopback_boot_commands(
         f'                echo "Loading Linux kernel: ({loop_dev}){k_path}..."',
         f'                linux ({loop_dev}){k_path} {k_args}',
         f'                echo "Loading initramfs: ({loop_dev}){i_path}..."',
-        f'                initrd ({loop_dev}){i_path}',
+    ])
+
+    if norm_overlay_path:
+        commands.extend([
+            f'                if [ -n "${{{boot_dev_var}}}" ]; then',
+            f'                    if [ -f "(${{{boot_dev_var}}}){norm_overlay_path}" ]; then',
+            f'                        echo "Loading supplementary initramfs overlay: (${{{boot_dev_var}}}){norm_overlay_path}..."',
+            f'                        initrd ({loop_dev}){i_path} (${{{boot_dev_var}}}){norm_overlay_path}',
+            '                    else',
+            f'                        initrd ({loop_dev}){i_path}',
+            '                    fi',
+            '                else',
+            f'                    initrd ({loop_dev}){i_path}',
+            '                fi',
+        ])
+    else:
+        commands.append(f'                initrd ({loop_dev}){i_path}')
+
+    commands.extend([
         '                echo "Booting kernel..."',
         '                boot',
         '            fi',
         '        fi',
         '    fi',
-    ]
-    return commands
+    ])
+    return [cmd.replace("\r", "").replace("\n", "") for cmd in commands]
 

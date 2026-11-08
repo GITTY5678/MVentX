@@ -155,8 +155,11 @@ class ISOMetadataExtractor:
         discovered_initrd = insp_res.discovered_initrd_path
         inspection_warnings = insp_res.warnings if insp_res.warnings else None
 
-        # Suggest default boot method
-        suggested_method = "linux_generic_loopback"
+        # Suggest default boot method matching detected distribution recipe
+        if detected_recipe and detected_recipe not in ("generic_kernel", "generic"):
+            suggested_method = detected_recipe
+        else:
+            suggested_method = "linux_generic_loopback"
 
         checksum_data = None
         if calculate_hash:

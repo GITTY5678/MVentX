@@ -63,6 +63,13 @@ class StorageManager:
             return self.boot_mount / "boot" / "grub" / "mventx_menu.cfg"
         return None
 
+    @property
+    def overlays_directory_path(self) -> Optional[Path]:
+        """Return path to overlay initramfs directory on the boot partition (boot/mventx/overlays/)."""
+        if self.boot_mount:
+            return self.boot_mount / "boot" / "mventx" / "overlays"
+        return None
+
     # --------------------------------------------------------------------------
     # Partition Directory Setup & Validation
     # --------------------------------------------------------------------------
@@ -281,5 +288,12 @@ class StorageManager:
         if not menu_path:
             return None
 
-        generator.write_menu_file(config_data, menu_path)
+        try:
+            generator.write_menu_file(config_data, menu_path)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Access denied writing GRUB menu to '{menu_path}'. "
+                "On Windows, modifying the EFI System Partition (MVX_BOOT) requires Administrator privileges "
+                "(Run as administrator)."
+            ) from exc
         return menu_path

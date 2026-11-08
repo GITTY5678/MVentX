@@ -199,11 +199,22 @@ class TestISOMetadataExtractor(unittest.TestCase):
         self.assertEqual(meta.system_identifier, "LINUX")
         self.assertEqual(meta.publisher_identifier, "RED_HAT")
         self.assertEqual(meta.detected_architecture, "x86_64")
-        self.assertEqual(meta.suggested_boot_method, "linux_generic_loopback")
+        self.assertEqual(meta.suggested_boot_method, "dracut")
         self.assertTrue(meta.has_el_torito_boot)
         self.assertIsNotNone(meta.registered_at)
         self.assertIsNotNone(meta.checksum)
         self.assertEqual(meta.checksum.get("algorithm"), "sha256")
+
+        # Generic / unrecognized ISO should suggest linux_generic_loopback
+        generic_iso = self.dir_path / "custom-os-x86_64.iso"
+        make_mock_iso(
+            generic_iso,
+            volume_id="CUSTOM_OS",
+            system_id="LINUX",
+            publisher_id="UNKNOWN",
+        )
+        generic_meta = ISOMetadataExtractor.extract_metadata(generic_iso)
+        self.assertEqual(generic_meta.suggested_boot_method, "linux_generic_loopback")
 
     def test_save_load_delete_metadata(self):
         iso_path = self.dir_path / "debian-12-arm64.iso"

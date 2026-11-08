@@ -35,6 +35,7 @@ from core.boot_config.generator import (
     sanitize_path,
     validate_display_name,
 )
+from core.boot_config.recipes import REGISTERED_RECIPES
 from core.iso_manager.metadata import ISOMetadata, ISOMetadataExtractor
 from core.iso_manager.validation import ISOValidationResult, ISOValidator
 from core.storage.storage_manager import StorageManager
@@ -77,6 +78,7 @@ class EnvironmentRecord:
     recipe: Optional[str] = None
     kernel_path: Optional[str] = None
     initrd_path: Optional[str] = None
+    overlay_path: Optional[str] = None
     checksum: Optional[Dict[str, str]] = None
     file_size_bytes: Optional[int] = None
     registered_at: Optional[str] = None
@@ -105,6 +107,8 @@ class EnvironmentRecord:
             data["kernel_path"] = self.kernel_path
         if self.initrd_path is not None:
             data["initrd_path"] = self.initrd_path
+        if self.overlay_path is not None:
+            data["overlay_path"] = self.overlay_path
         if self.target_path is not None:
             data["target_path"] = self.target_path
         if self.target_hint is not None:
@@ -116,6 +120,13 @@ class EnvironmentRecord:
         if self.bootloader_path is not None:
             data["bootloader_path"] = self.bootloader_path
         return data
+
+    @property
+    def sha256(self) -> Optional[str]:
+        """Return the SHA-256 hex digest if calculated and stored in checksum."""
+        if isinstance(self.checksum, dict):
+            return self.checksum.get("value") or self.checksum.get("sha256")
+        return None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> EnvironmentRecord:
@@ -132,12 +143,32 @@ class EnvironmentRecord:
             recipe=data.get("recipe"),
             kernel_path=data.get("kernel_path"),
             initrd_path=data.get("initrd_path"),
+            overlay_path=data.get("overlay_path"),
             target_path=data.get("target_path"),
             target_hint=data.get("target_hint"),
             checksum=data.get("checksum"),
             staged_subfolder=data.get("staged_subfolder"),
             bootloader_path=data.get("bootloader_path"),
         )
+
+
+@dataclass
+class OverlayStatus:
+    """Represents the state of an environment's dynamic initramfs overlay."""
+    requires_overlay: bool
+    overlay_exists: bool
+    needs_regeneration: bool
+    state: str  # "not_required", "ready", "missing", "needs_regeneration"
+    status_label: str
+    detail_message: str
+    overlay_file_path: Optional[Path] = None
+    overlay_size_bytes: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        if self.overlay_file_path is not None:
+            data["overlay_file_path"] = str(self.overlay_file_path)
+        return data
 
 
 @dataclass
@@ -275,6 +306,7 @@ class ISORegistrationManager:
         self,
         new_config: Dict[str, Any],
         metadata_to_cleanup_on_error: Optional[str] = None,
+        overlay_to_cleanup_on_error: Optional[str] = None,
     ) -> None:
         """Validate, atomically save new config, and synchronize GRUB boot menu.
 
@@ -301,6 +333,15 @@ class ISORegistrationManager:
             if metadata_to_cleanup_on_error:
                 ISOMetadataExtractor.delete_metadata(self.metadata_directory, metadata_to_cleanup_on_error)
 
+            # Cleanup newly created overlay if applicable
+            if overlay_to_cleanup_on_error:
+                try:
+                    overlay_file = self.storage_manager.overlays_directory_path / f"{overlay_to_cleanup_on_error}.cpio"
+                    if overlay_file.is_file():
+                        overlay_file.unlink()
+                except OSError:
+                    pass
+
             # Attempt to re-sync menu back to prior state
             try:
                 self.storage_manager.sync_boot_menu(generator=generator)
@@ -319,7 +360,7 @@ class ISORegistrationManager:
         self,
         iso_path: Union[Path, str],
         display_name: str,
-        boot_method: str = "linux_generic_loopback",
+        boot_method: Optional[str] = None,
         custom_args: Optional[str] = None,
         description: Optional[str] = None,
         enabled: bool = True,
@@ -329,6 +370,7 @@ class ISORegistrationManager:
         recipe: Optional[str] = None,
         kernel_path: Optional[str] = None,
         initrd_path: Optional[str] = None,
+        generate_overlay: Optional[bool] = None,
     ) -> EnvironmentRecord:
         """Manually register an existing ISO image into the environment store.
 
@@ -403,22 +445,65 @@ class ISORegistrationManager:
         ISOMetadataExtractor.save_metadata(self.metadata_directory, env_id, meta)
 
         # 7. Build EnvironmentRecord
+        chosen_boot_method = boot_method
+        if not chosen_boot_method:
+            chosen_boot_method = meta.suggested_boot_method or meta.detected_recipe or "linux_generic_loopback"
+
         if not recipe:
-            recipe = meta.detected_recipe
-        if not recipe:
-            from core.boot_config.recipes import detect_recipe_from_hints
-            recipe = detect_recipe_from_hints(abs_iso_path.name, meta.volume_identifier).recipe_id
+            if chosen_boot_method in REGISTERED_RECIPES:
+                recipe = REGISTERED_RECIPES[chosen_boot_method].recipe_id
+            elif meta.detected_recipe:
+                recipe = meta.detected_recipe
+            else:
+                from core.boot_config.recipes import detect_recipe_from_hints
+                recipe = detect_recipe_from_hints(abs_iso_path.name, meta.volume_identifier).recipe_id
 
         # Use discovered kernel and initrd paths if user did not provide explicit overrides
         final_kernel_path = kernel_path or meta.discovered_kernel_path
         final_initrd_path = initrd_path or meta.discovered_initrd_path
+
+        # 8. Check if dynamic initramfs overlay is needed (e.g. Ubuntu / Casper boots from exFAT MVX_DATA)
+        overlay_rel_path: Optional[str] = None
+        if recipe == "casper" or chosen_boot_method == "casper":
+            from core.iso_manager.overlay_generator import InitramfsOverlayGenerator
+            should_generate = False
+            if generate_overlay is True:
+                should_generate = True
+            elif generate_overlay is None:
+                should_generate = InitramfsOverlayGenerator.can_generate_overlay(abs_iso_path)
+
+            if should_generate:
+                try:
+                    overlays_dir = self.storage_manager.overlays_directory_path
+                    overlays_dir.mkdir(parents=True, exist_ok=True)
+                    overlay_filename = f"{env_id}.cpio"
+                    target_overlay_file = overlays_dir / overlay_filename
+
+                    res = InitramfsOverlayGenerator.generate_exfat_overlay(
+                        iso_path=abs_iso_path,
+                        output_cpio_path=target_overlay_file,
+                        target_kernel_version=None,
+                    )
+                    if res.success:
+                        overlay_rel_path = f"boot/mventx/overlays/{overlay_filename}"
+                except Exception as exc:
+                    # Clean up partial overlay file
+                    try:
+                        partial = self.storage_manager.overlays_directory_path / f"{env_id}.cpio"
+                        if partial.is_file():
+                            partial.unlink()
+                    except OSError:
+                        pass
+                    raise RegistrationError(
+                        f"Dynamic initramfs overlay generation failed for '{abs_iso_path.name}': {exc}"
+                    ) from exc
 
         next_order = len(environments) + 1
         record = EnvironmentRecord(
             id=env_id,
             display_name=safe_name,
             type="iso",
-            boot_method=boot_method,
+            boot_method=chosen_boot_method,
             enabled=enabled,
             order=next_order,
             iso_path=canonical_rel_path,
@@ -427,17 +512,22 @@ class ISORegistrationManager:
             recipe=recipe,
             kernel_path=final_kernel_path,
             initrd_path=final_initrd_path,
+            overlay_path=overlay_rel_path,
             checksum=meta.checksum,
             file_size_bytes=file_size,
             registered_at=meta.registered_at,
         )
 
-        # 8. Append to environments list and update configuration
+        # 9. Append to environments list and update configuration
         environments.append(record.to_dict())
         config["environments"] = environments
 
-        # 9. Save and sync with automatic rollback on failure
-        self._save_and_sync_with_rollback(config, metadata_to_cleanup_on_error=env_id)
+        # 10. Save and sync with automatic rollback on failure
+        self._save_and_sync_with_rollback(
+            config,
+            metadata_to_cleanup_on_error=env_id,
+            overlay_to_cleanup_on_error=env_id if overlay_rel_path else None,
+        )
 
         return record
 
@@ -565,6 +655,7 @@ class ISORegistrationManager:
         description: Optional[str] = None,
         boot_method: Optional[str] = None,
         enabled: Optional[bool] = None,
+        regenerate_overlay: bool = False,
     ) -> EnvironmentRecord:
         """Update configurable fields of an existing registered environment."""
         config = self._load_config()
@@ -596,7 +687,307 @@ class ISORegistrationManager:
         if enabled is not None:
             target_env["enabled"] = bool(enabled)
 
-        self._save_and_sync_with_rollback(config)
+        # Handle overlay updates or regeneration if needed
+        overlay_cleanup_id: Optional[str] = None
+        new_recipe = target_env.get("recipe")
+        new_method = target_env.get("boot_method")
+        is_casper = (new_recipe == "casper" or new_method == "casper")
+
+        if is_casper:
+            if regenerate_overlay or not target_env.get("overlay_path"):
+                rel_iso = target_env.get("iso_path")
+                if rel_iso:
+                    abs_iso = (self.storage_manager.data_mount / rel_iso.lstrip("/\\")).resolve()
+                    from core.iso_manager.overlay_generator import InitramfsOverlayGenerator
+                    should_gen = True if regenerate_overlay else InitramfsOverlayGenerator.can_generate_overlay(abs_iso)
+                    if should_gen:
+                        try:
+                            overlays_dir = self.storage_manager.overlays_directory_path
+                            if not overlays_dir:
+                                raise RegistrationError("MVX_BOOT overlays directory is not available.")
+                            overlays_dir.mkdir(parents=True, exist_ok=True)
+                            overlay_file = overlays_dir / f"{env_id}.cpio"
+                            res = InitramfsOverlayGenerator.generate_exfat_overlay(
+                                iso_path=abs_iso,
+                                output_cpio_path=overlay_file,
+                            )
+                            if res.success:
+                                target_env["overlay_path"] = f"boot/mventx/overlays/{env_id}.cpio"
+                                overlay_cleanup_id = env_id
+                        except Exception as exc:
+                            raise RegistrationError(
+                                f"Dynamic initramfs overlay generation failed for '{abs_iso.name}': {exc}"
+                            ) from exc
+        else:
+            if target_env.get("overlay_path"):
+                try:
+                    if self.storage_manager.boot_mount:
+                        old_path = (self.storage_manager.boot_mount / target_env["overlay_path"].lstrip("/\\")).resolve()
+                        if old_path.is_file():
+                            old_path.unlink()
+                except OSError:
+                    pass
+                target_env["overlay_path"] = None
+
+        self._save_and_sync_with_rollback(config, overlay_to_cleanup_on_error=overlay_cleanup_id)
+
+        updated = self.get_environment(env_id)
+        assert updated is not None
+        return updated
+
+    def get_overlay_status(self, env_or_id: Union[EnvironmentRecord, str]) -> OverlayStatus:
+        """Inspect whether an environment requires an initramfs overlay, whether one exists, and whether it needs regeneration."""
+        if isinstance(env_or_id, str):
+            env = self.get_environment(env_or_id)
+            if env is None:
+                raise EnvironmentNotFoundError(f"Environment '{env_or_id}' not found.")
+        else:
+            env = env_or_id
+
+        requires_overlay = bool(
+            env.type == "iso" and (env.recipe == "casper" or env.boot_method == "casper")
+        )
+        if not requires_overlay:
+            return OverlayStatus(
+                requires_overlay=False,
+                overlay_exists=False,
+                needs_regeneration=False,
+                state="not_required",
+                status_label="Not Required",
+                detail_message="This boot method does not require a supplementary initramfs overlay.",
+            )
+
+        if not self.storage_manager.boot_mount:
+            return OverlayStatus(
+                requires_overlay=True,
+                overlay_exists=False,
+                needs_regeneration=True,
+                state="missing",
+                status_label="Required • Missing (No Boot Mount)",
+                detail_message="Requires initramfs overlay, but MVX_BOOT partition is not mounted.",
+            )
+
+        rel_overlay = env.overlay_path
+        if not rel_overlay:
+            return OverlayStatus(
+                requires_overlay=True,
+                overlay_exists=False,
+                needs_regeneration=True,
+                state="missing",
+                status_label="Required • Missing (Needs Regen)",
+                detail_message=(
+                    "Requires supplementary exFAT initramfs overlay for Casper boot, "
+                    "but no overlay is configured. Use 'Repair / Regenerate' to build it."
+                ),
+            )
+
+        abs_overlay = (self.storage_manager.boot_mount / rel_overlay.lstrip("/\\")).resolve()
+        if not abs_overlay.is_file():
+            return OverlayStatus(
+                requires_overlay=True,
+                overlay_exists=False,
+                needs_regeneration=True,
+                state="missing",
+                status_label="Required • Missing (Needs Regen)",
+                detail_message=(
+                    f"Requires supplementary exFAT initramfs overlay, but '{rel_overlay}' "
+                    f"was not found on MVX_BOOT. Regeneration is required."
+                ),
+                overlay_file_path=abs_overlay,
+            )
+
+        try:
+            st = abs_overlay.stat()
+            size_bytes = st.st_size
+            overlay_mtime = st.st_mtime
+            with open(abs_overlay, "rb") as f:
+                header_magic = f.read(6)
+        except OSError as exc:
+            return OverlayStatus(
+                requires_overlay=True,
+                overlay_exists=True,
+                needs_regeneration=True,
+                state="needs_regeneration",
+                status_label="Required • Unreadable (Needs Regen)",
+                detail_message=f"Overlay file exists on MVX_BOOT but could not be read: {exc}",
+                overlay_file_path=abs_overlay,
+            )
+
+        if size_bytes < 512 or header_magic != b"070701":
+            return OverlayStatus(
+                requires_overlay=True,
+                overlay_exists=True,
+                needs_regeneration=True,
+                state="needs_regeneration",
+                status_label="Required • Corrupted (Needs Regen)",
+                detail_message=(
+                    f"Overlay file '{rel_overlay}' exists on MVX_BOOT ({size_bytes} B) "
+                    f"but is not a valid newc CPIO archive. Regeneration is required."
+                ),
+                overlay_file_path=abs_overlay,
+                overlay_size_bytes=size_bytes,
+            )
+
+        if env.iso_path:
+            iso_candidate = (self.storage_manager.data_mount / env.iso_path.lstrip("/\\")).resolve()
+            if iso_candidate.is_file():
+                try:
+                    iso_mtime = iso_candidate.stat().st_mtime
+                    if iso_mtime > overlay_mtime + 2.0:
+                        return OverlayStatus(
+                            requires_overlay=True,
+                            overlay_exists=True,
+                            needs_regeneration=True,
+                            state="needs_regeneration",
+                            status_label="Required • Outdated (Needs Regen)",
+                            detail_message=(
+                                f"Overlay exists on MVX_BOOT ({rel_overlay}), but the source ISO "
+                                f"was modified after the overlay was generated. Regeneration is required."
+                            ),
+                            overlay_file_path=abs_overlay,
+                            overlay_size_bytes=size_bytes,
+                        )
+                except OSError:
+                    pass
+
+        menu_file = self.storage_manager.generated_menu_path
+        if env.enabled and menu_file and menu_file.is_file():
+            try:
+                menu_text = menu_file.read_text(encoding="utf-8", errors="ignore")
+                norm_rel = rel_overlay.replace("\\", "/").lstrip("/")
+                if norm_rel not in menu_text:
+                    return OverlayStatus(
+                        requires_overlay=True,
+                        overlay_exists=True,
+                        needs_regeneration=True,
+                        state="needs_regeneration",
+                        status_label="Required • Menu Unsynced (Needs Regen)",
+                        detail_message=(
+                            f"Overlay file exists on MVX_BOOT ({rel_overlay}), but the GRUB menu "
+                            f"does not currently reference it. Regeneration/repair is required."
+                        ),
+                        overlay_file_path=abs_overlay,
+                        overlay_size_bytes=size_bytes,
+                    )
+            except OSError:
+                pass
+
+        return OverlayStatus(
+            requires_overlay=True,
+            overlay_exists=True,
+            needs_regeneration=False,
+            state="ready",
+            status_label="Required • Ready",
+            detail_message=(
+                f"Dynamic exFAT initramfs overlay exists on MVX_BOOT ({rel_overlay}, "
+                f"{size_bytes:,} bytes) and is synchronized with the GRUB boot menu."
+            ),
+            overlay_file_path=abs_overlay,
+            overlay_size_bytes=size_bytes,
+        )
+
+    def regenerate_boot_support(
+        self,
+        env_id: str,
+        progress_callback: Optional[Any] = None,
+    ) -> EnvironmentRecord:
+        """Regenerate or repair an environment's initramfs overlay and synchronize the GRUB boot menu atomically.
+
+        Architectural Invariants:
+        1. Never reformats or repartitions the USB drive.
+        2. Strictly preserves the registered ISO file on MVX_DATA.
+        3. Updates MVX_BOOT and mventx.json atomically with full rollback on error.
+        """
+        config = self._load_config()
+        environments = config.get("environments", [])
+
+        target_env = None
+        for env in environments:
+            if env.get("id") == env_id:
+                target_env = env
+                break
+
+        if not target_env:
+            raise EnvironmentNotFoundError(f"Environment '{env_id}' not found.")
+
+        display_name = target_env.get("display_name", env_id)
+        if progress_callback:
+            progress_callback(10, f"Validating environment '{display_name}'...")
+
+        rel_iso = target_env.get("iso_path")
+        abs_iso: Optional[Path] = None
+        if target_env.get("type") == "iso":
+            if not rel_iso:
+                raise RegistrationError(f"Environment '{display_name}' has no configured ISO path.")
+            abs_iso = (self.storage_manager.data_mount / rel_iso.lstrip("/\\")).resolve()
+            if not abs_iso.is_file():
+                raise FileNotFoundError(f"Registered ISO file not found on MVX_DATA: {rel_iso}")
+
+        is_casper = (
+            target_env.get("recipe") == "casper" or target_env.get("boot_method") == "casper"
+        )
+
+        prior_overlay_bytes: Optional[bytes] = None
+        target_overlay_file: Optional[Path] = None
+
+        if is_casper and abs_iso:
+            overlays_dir = self.storage_manager.overlays_directory_path
+            if not overlays_dir:
+                raise RegistrationError("MVX_BOOT partition is not mounted; cannot write initramfs overlay.")
+            overlays_dir.mkdir(parents=True, exist_ok=True)
+            overlay_filename = f"{env_id}.cpio"
+            target_overlay_file = overlays_dir / overlay_filename
+
+            if target_overlay_file.is_file():
+                try:
+                    prior_overlay_bytes = target_overlay_file.read_bytes()
+                except OSError:
+                    prior_overlay_bytes = None
+
+            if progress_callback:
+                progress_callback(35, f"Extracting kernel driver and building initramfs overlay for '{abs_iso.name}'...")
+
+            try:
+                from core.iso_manager.overlay_generator import InitramfsOverlayGenerator
+                res = InitramfsOverlayGenerator.generate_exfat_overlay(
+                    iso_path=abs_iso,
+                    output_cpio_path=target_overlay_file,
+                )
+                if not res.success:
+                    raise RegistrationError("; ".join(res.errors) or "Overlay generation reported failure.")
+                target_env["overlay_path"] = f"boot/mventx/overlays/{overlay_filename}"
+            except Exception as exc:
+                # Restore prior overlay if it existed, or remove partial file
+                if target_overlay_file:
+                    try:
+                        if prior_overlay_bytes is not None:
+                            target_overlay_file.write_bytes(prior_overlay_bytes)
+                        elif target_overlay_file.is_file():
+                            target_overlay_file.unlink()
+                    except OSError:
+                        pass
+                raise RegistrationError(
+                    f"Failed to regenerate initramfs overlay for '{display_name}': {exc}"
+                ) from exc
+
+        if progress_callback:
+            progress_callback(80, "Synchronizing configuration and GRUB boot menu on MVX_BOOT...")
+
+        try:
+            self._save_and_sync_with_rollback(
+                config,
+                overlay_to_cleanup_on_error=env_id if (is_casper and prior_overlay_bytes is None) else None,
+            )
+        except Exception:
+            if target_overlay_file and prior_overlay_bytes is not None:
+                try:
+                    target_overlay_file.write_bytes(prior_overlay_bytes)
+                except OSError:
+                    pass
+            raise
+
+        if progress_callback:
+            progress_callback(100, f"Boot support repaired and synchronized for '{display_name}'.")
 
         updated = self.get_environment(env_id)
         assert updated is not None
@@ -683,6 +1074,16 @@ class ISORegistrationManager:
         if target_idx is None or target_env is None:
             raise EnvironmentNotFoundError(f"Environment '{env_id}' not found.")
 
+        # Check for associated overlay file to remove on MVX_BOOT
+        overlay_file_to_delete: Optional[Path] = None
+        rel_overlay = target_env.get("overlay_path")
+        if rel_overlay:
+            candidate_overlay = (self.storage_manager.boot_mount / rel_overlay).resolve()
+            if candidate_overlay.is_file():
+                overlay_file_to_delete = candidate_overlay
+        elif (self.storage_manager.overlays_directory_path / f"{env_id}.cpio").is_file():
+            overlay_file_to_delete = self.storage_manager.overlays_directory_path / f"{env_id}.cpio"
+
         # If file deletion is requested, ensure explicit confirmation
         iso_file_to_delete: Optional[Path] = None
         if delete_file:
@@ -710,6 +1111,13 @@ class ISORegistrationManager:
         # Remove metadata cache file
         ISOMetadataExtractor.delete_metadata(self.metadata_directory, env_id)
 
+        # Remove supplementary overlay file if one was generated
+        if overlay_file_to_delete and overlay_file_to_delete.exists():
+            try:
+                overlay_file_to_delete.unlink()
+            except OSError:
+                pass
+
         # Safely delete underlying file only after configuration commit succeeds
         if iso_file_to_delete and iso_file_to_delete.exists():
             try:
@@ -719,6 +1127,36 @@ class ISORegistrationManager:
                 pass
 
         return True
+
+    def clean_orphaned_overlays(self) -> int:
+        """Scan MVX_BOOT overlays directory and remove any *.cpio files not referenced by any registered environment.
+
+        Returns:
+            Number of orphaned overlay files removed.
+        """
+        overlays_dir = self.storage_manager.overlays_directory_path
+        if not overlays_dir.is_dir():
+            return 0
+
+        config = self._load_config()
+        referenced_files = set()
+        for env in config.get("environments", []):
+            op = env.get("overlay_path")
+            if op:
+                referenced_files.add(Path(op).name)
+            eid = env.get("id")
+            if eid:
+                referenced_files.add(f"{eid}.cpio")
+
+        removed = 0
+        for item in overlays_dir.glob("*.cpio"):
+            if item.is_file() and item.name not in referenced_files:
+                try:
+                    item.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
 
     # --------------------------------------------------------------------------
     # Storage Capacity & Missing ISO Inspection

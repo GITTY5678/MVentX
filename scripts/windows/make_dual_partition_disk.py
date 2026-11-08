@@ -253,12 +253,12 @@ class FAT32Builder:
 
             dir_cluster = 0
             if not is_root:
-                # Calculate clusters needed for directory entries to avoid truncating large directories
-                est_bytes = 64  # . and ..
+                # Calculate exact clusters needed for directory entries to avoid truncating large directories or overrunning into file clusters
+                exact_bytes = 64  # . (32) and .. (32)
                 for it in items:
-                    vfat_count = max(1, math.ceil(len(it.name) / 13))
-                    est_bytes += (vfat_count + 1) * 32
-                dir_clusters_needed = max(1, math.ceil(est_bytes / self.cluster_size))
+                    vfat_count = math.ceil((len(it.name) + 1) / 13)
+                    exact_bytes += (vfat_count + 1) * 32
+                dir_clusters_needed = max(1, math.ceil(exact_bytes / self.cluster_size))
                 dir_cluster = self.allocate_clusters(dir_clusters_needed)
 
                 dot = bytearray(32)
@@ -276,11 +276,11 @@ class FAT32Builder:
                 dir_entries.extend(dotdot)
             else:
                 # Root directory starts at cluster 2. Check if multiple clusters are needed.
-                est_bytes = 32  # volume label
+                exact_bytes = 32  # volume label
                 for it in items:
-                    vfat_count = max(1, math.ceil(len(it.name) / 13))
-                    est_bytes += (vfat_count + 1) * 32
-                root_clusters_needed = max(1, math.ceil(est_bytes / self.cluster_size))
+                    vfat_count = math.ceil((len(it.name) + 1) / 13)
+                    exact_bytes += (vfat_count + 1) * 32
+                root_clusters_needed = max(1, math.ceil(exact_bytes / self.cluster_size))
                 if root_clusters_needed > 1:
                     extra = root_clusters_needed - 1
                     for i in range(extra):

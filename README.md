@@ -232,6 +232,25 @@ bash scripts/run_qemu.sh
 
 ---
 
+## Feature Verification Matrix
+
+| Feature / Subsystem | Status | Verification Level | Notes |
+|---|---|---|---|
+| **GPT Dual-Partition Layout** | Production | **Physically verified** | Verified on SanDisk Cruzer Blade 64GB (FAT32 ESP + exFAT Data) |
+| **Windows Physical Installer & Recovery** | Production | **Physically verified** | State-aware 7-state installation and resume engine |
+| **Official GNU GRUB 2.12 EFI Bootloader** | Production | **Physically verified** | Boots cleanly to gfxterm on physical HP laptop hardware |
+| **Command Capability Registry** | Production | **Build-verified & QEMU-verified** | Validates built-in vs dynamic modules, manifests, and dependencies |
+| **Reboot System Utility (`reboot`)** | Production | **QEMU-verified** | Hardware cold reset verified in QEMU via UEFI Runtime Services |
+| **Halt / Power Off Utility (`halt`)** | Production | **QEMU-verified** | System halt & ACPI D3/S5 poweroff verified with clean VM exit |
+| **Exit GRUB Utility (`exit`)** | Production | **QEMU-verified** | Return to UEFI Boot Manager / firmware dispatcher verified |
+| **UEFI Firmware Settings (`fwsetup`)** | Production | **QEMU-verified** | Firmware setup request with fallback notice for unsupported systems |
+| **exFAT Dynamic Module (`exfat.mod`)** | Production | **QEMU-verified** | Dynamic module load and `MVX_DATA` discovery verified |
+| **Linux ISO Loopback Boot** | Production | **QEMU-verified** | Casper, ArchISO, Dracut, Live-Boot recipes implemented |
+| **Secure Boot (Enabled)** | In Progress | **Not yet supported** | Requires signed shim / Microsoft 3rd-party UEFI CA certificate |
+| **Windows Installation ISO Direct Boot** | Paused | **Not yet supported** | Paused per Decision 2.1 (UEFI exFAT loader limitations) |
+
+---
+
 ## Documentation
 
 - [Architecture Overview](docs/architecture.md)
@@ -239,6 +258,9 @@ bash scripts/run_qemu.sh
 - [Installation Guide](docs/installation.md)
 - [Configuration Schema & Reference](docs/configuration.md)
 - [Development Roadmap](docs/development-roadmap.md)
+- [Milestone 18: GRUB Command Integration & System Utilities](docs/milestone-18-grub-command-integration.md)
+- [Milestone 17.1: Windows Physical Installer Reliability](docs/milestone-17-1-windows-physical-installer-reliability.md)
+- [Milestone 17.2: Physical Installation Resume](docs/milestone-17-2-physical-installation-resume.md)
 - [Milestone 5: Storage Validation Report](docs/milestone-5-storage-validation.md)
 - [Milestone 6: End-to-End Integration Report](docs/milestone-6-end-to-end-integration.md)
 - [Milestone 7: Linux ISO Loopback Boot Report](docs/milestone-7-linux-boot.md)

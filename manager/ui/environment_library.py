@@ -17,6 +17,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QScrollArea,
     QTableWidget,
@@ -36,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.iso_manager import EnvironmentRecord
+from core.iso_manager import EnvironmentRecord, OverlayStatus
 from manager.services.iso_service import ISOService
 from manager.services.workers import ChecksumWorker, ISOCopyWorker
 from manager.ui.progress_dialog import OperationProgressDialog
@@ -45,6 +47,7 @@ from manager.ui.styles import (
     COLOR_DANGER,
     COLOR_SUCCESS,
     COLOR_TEXT_MUTED,
+    COLOR_WARNING,
 )
 
 
@@ -66,7 +69,7 @@ class EnvironmentDetailDialog(QDialog):
         self.env = env
         self.iso_service = iso_service
         self.setWindowTitle(f"Environment Inspector — {env.display_name}")
-        self.setFixedSize(620, 480)
+        self.setFixedSize(650, 620)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -91,6 +94,39 @@ class EnvironmentDetailDialog(QDialog):
         self._add_row(form, "Initramfs Path:", getattr(env, "initrd_path", "") or "Auto-detected by recipe")
         self._add_row(form, "Custom Kernel Args:", env.custom_args or "Default distribution parameters")
         self._add_row(form, "Description:", env.description or "None")
+
+        # Initramfs Overlay Status & Boot Support Repair
+        ov_status = self.iso_service.get_overlay_status(env)
+        self.ov_req_lbl = QLabel("Yes (Casper exFAT Boot Support)" if ov_status.requires_overlay else "No")
+        self.ov_req_lbl.setStyleSheet("color: #e5e7eb; font-weight: 500;")
+        form.addRow("Requires Initramfs Overlay:", self.ov_req_lbl)
+
+        self.ov_exists_lbl = QLabel("Yes" if ov_status.overlay_exists else "No")
+        self.ov_exists_lbl.setStyleSheet("color: #e5e7eb; font-weight: 500;")
+        form.addRow("Overlay Exists on MVX_BOOT:", self.ov_exists_lbl)
+
+        self.ov_regen_lbl = QLabel("Yes" if ov_status.needs_regeneration else "No")
+        self.ov_regen_lbl.setStyleSheet(
+            f"color: {COLOR_WARNING if ov_status.needs_regeneration else COLOR_SUCCESS}; font-weight: 600;"
+        )
+        form.addRow("Needs Regeneration:", self.ov_regen_lbl)
+
+        self.ov_status_lbl = QLabel(f"{ov_status.status_label} — {ov_status.detail_message}")
+        self.ov_status_lbl.setWordWrap(True)
+        self.ov_status_lbl.setStyleSheet("color: #e5e7eb; font-weight: 500;")
+        form.addRow("Overlay Status:", self.ov_status_lbl)
+
+        self.ov_path_lbl = QLabel(env.overlay_path or "None")
+        self.ov_path_lbl.setStyleSheet("font-family: monospace; font-size: 11px; color: #9ca3af;")
+        form.addRow("Overlay Path:", self.ov_path_lbl)
+
+        self.btn_repair_boot = QPushButton("Regenerate / Repair Boot Support")
+        self.btn_repair_boot.setFixedWidth(250)
+        self.btn_repair_boot.setToolTip(
+            "Rebuild the initramfs overlay (if required) and synchronize the MVX_BOOT GRUB menu atomically."
+        )
+        self.btn_repair_boot.clicked.connect(self._on_repair_boot_support)
+        form.addRow("Boot Support Action:", self.btn_repair_boot)
 
         # SHA-256 row with verification button
         hash_val = env.sha256 or "Not calculated"
@@ -120,6 +156,48 @@ class EnvironmentDetailDialog(QDialog):
         lbl.setStyleSheet("color: #e5e7eb; font-weight: 500;")
         lbl.setWordWrap(True)
         form.addRow(label, lbl)
+
+    def _refresh_overlay_display(self) -> None:
+        ov_status = self.iso_service.get_overlay_status(self.env)
+        self.ov_req_lbl.setText("Yes (Casper exFAT Boot Support)" if ov_status.requires_overlay else "No")
+        self.ov_exists_lbl.setText("Yes" if ov_status.overlay_exists else "No")
+        self.ov_regen_lbl.setText("Yes" if ov_status.needs_regeneration else "No")
+        self.ov_regen_lbl.setStyleSheet(
+            f"color: {COLOR_WARNING if ov_status.needs_regeneration else COLOR_SUCCESS}; font-weight: 600;"
+        )
+        self.ov_status_lbl.setText(f"{ov_status.status_label} — {ov_status.detail_message}")
+        self.ov_path_lbl.setText(self.env.overlay_path or "None")
+
+    def _on_repair_boot_support(self) -> None:
+        progress = QProgressDialog(
+            f"Regenerating boot support for '{self.env.display_name}'...",
+            None,
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle("Repair / Regenerate Boot Support")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(5)
+        QApplication.processEvents()
+
+        def _cb(pct: int, msg: str) -> None:
+            progress.setValue(pct)
+            progress.setLabelText(msg)
+            QApplication.processEvents()
+
+        updated = self.iso_service.regenerate_boot_support(self.env.id, progress_callback=_cb)
+        progress.close()
+        if updated:
+            self.env = updated
+            self._refresh_overlay_display()
+            QMessageBox.information(
+                self,
+                "Boot Support Updated",
+                f"Boot support and MVX_BOOT menu configuration for '{updated.display_name}' "
+                "have been regenerated and synchronized.",
+            )
 
     def _on_compute_hash(self) -> None:
         target = self.iso_service.device_service.active_target
@@ -290,6 +368,13 @@ class EnvironmentLibraryScreen(QWidget):
         self.btn_batch_disable.clicked.connect(lambda: self._execute_batch_toggle(False))
         batch_bar.addWidget(self.btn_batch_disable)
 
+        self.btn_batch_repair = QPushButton("⟳ Repair / Regenerate Selected")
+        self.btn_batch_repair.setToolTip(
+            "Regenerate initramfs overlays (where required) and synchronize MVX_BOOT GRUB configuration for selected environments."
+        )
+        self.btn_batch_repair.clicked.connect(self._execute_batch_repair)
+        batch_bar.addWidget(self.btn_batch_repair)
+
         self.btn_batch_remove = QPushButton("🗑 Remove Selected")
         self.btn_batch_remove.setProperty("class", "dangerButton")
         self.btn_batch_remove.clicked.connect(self._execute_batch_remove)
@@ -307,7 +392,7 @@ class EnvironmentLibraryScreen(QWidget):
         # 3. Main Environments Table
         # ----------------------------------------------------------------------
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Order",
             "Environment Name",
@@ -315,6 +400,7 @@ class EnvironmentLibraryScreen(QWidget):
             "File Size",
             "Boot Method",
             "Status",
+            "Overlay Status",
             "Actions",
         ])
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -323,6 +409,7 @@ class EnvironmentLibraryScreen(QWidget):
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
 
         layout.addWidget(self.table)
 
@@ -466,7 +553,37 @@ class EnvironmentLibraryScreen(QWidget):
             s_layout.addWidget(status_lbl)
             self.table.setCellWidget(row, 5, status_widget)
 
-            # 7. Action Buttons
+            # 7. Initramfs Overlay Status Badge Pill
+            ov_status: OverlayStatus = self.iso_service.get_overlay_status(env)
+            ov_tooltip = (
+                f"Requires Initramfs Overlay: {'Yes' if ov_status.requires_overlay else 'No'}\n"
+                f"Overlay Exists on MVX_BOOT: {'Yes' if ov_status.overlay_exists else 'No'}\n"
+                f"Needs Regeneration: {'Yes' if ov_status.needs_regeneration else 'No'}\n"
+                f"Details: {ov_status.detail_message}"
+            )
+            ov_item = QTableWidgetItem(ov_status.status_label)
+            ov_item.setToolTip(ov_tooltip)
+            self.table.setItem(row, 6, ov_item)
+
+            ov_widget = QWidget()
+            ov_layout = QHBoxLayout(ov_widget)
+            ov_layout.setContentsMargins(4, 2, 4, 2)
+            ov_layout.setAlignment(Qt.AlignCenter)
+
+            ov_lbl = QLabel(ov_status.status_label)
+            ov_lbl.setToolTip(ov_tooltip)
+            if ov_status.state == "ready":
+                ov_lbl.setProperty("class", "statusBadgeEnabled")
+            elif ov_status.state == "missing":
+                ov_lbl.setProperty("class", "statusBadgeCorrupted")
+            elif ov_status.state == "needs_regeneration":
+                ov_lbl.setProperty("class", "statusBadgeWarning")
+            else:
+                ov_lbl.setProperty("class", "statusBadgeDisabled")
+            ov_layout.addWidget(ov_lbl)
+            self.table.setCellWidget(row, 6, ov_widget)
+
+            # 8. Action Buttons
             action_widget = QWidget()
             a_layout = QHBoxLayout(action_widget)
             a_layout.setContentsMargins(4, 2, 4, 2)
@@ -493,6 +610,17 @@ class EnvironmentLibraryScreen(QWidget):
             btn_toggle.clicked.connect(lambda _, eid=env.id, en=env.enabled: self.iso_service.toggle_environment_enabled(eid, not en))
             a_layout.addWidget(btn_toggle)
 
+            # Repair / Regenerate Boot Support
+            btn_repair = QPushButton("Repair Boot" if ov_status.needs_regeneration else "Regenerate")
+            btn_repair.setFixedHeight(26)
+            btn_repair.setToolTip(
+                "Regenerate initramfs overlay (if required) and synchronize MVX_BOOT GRUB configuration atomically."
+            )
+            if ov_status.needs_regeneration:
+                btn_repair.setProperty("class", "primaryButton")
+            btn_repair.clicked.connect(lambda _, e=env: self._on_repair_clicked(e))
+            a_layout.addWidget(btn_repair)
+
             # Rename
             btn_rename = QPushButton("Rename")
             btn_rename.setFixedHeight(26)
@@ -512,7 +640,7 @@ class EnvironmentLibraryScreen(QWidget):
             btn_remove.clicked.connect(lambda _, e=env: self._on_remove_clicked(e))
             a_layout.addWidget(btn_remove)
 
-            self.table.setCellWidget(row, 6, action_widget)
+            self.table.setCellWidget(row, 7, action_widget)
 
         self.table.resizeRowsToContents()
 
@@ -543,6 +671,54 @@ class EnvironmentLibraryScreen(QWidget):
         for eid in ids:
             self.iso_service.toggle_environment_enabled(eid, enable)
 
+    def _execute_batch_repair(self) -> None:
+        ids = self._get_selected_environment_ids()
+        if not ids:
+            QMessageBox.information(
+                self,
+                "No Selection",
+                "Please select one or more environments to repair or regenerate.",
+            )
+            return
+
+        progress = QProgressDialog(
+            "Regenerating boot support for selected environments...",
+            None,
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle("Repair / Regenerate Boot Support")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(0)
+        QApplication.processEvents()
+
+        repaired_count = 0
+        total = len(ids)
+        for idx, eid in enumerate(ids):
+            base_pct = int((idx / total) * 100)
+
+            def _cb(pct: int, msg: str, b: int = base_pct, n: int = total) -> None:
+                scaled = min(99, b + int(pct / n))
+                progress.setValue(scaled)
+                progress.setLabelText(msg)
+                QApplication.processEvents()
+
+            res = self.iso_service.regenerate_boot_support(eid, progress_callback=_cb)
+            if res is not None:
+                repaired_count += 1
+
+        progress.setValue(100)
+        progress.close()
+        if repaired_count > 0:
+            QMessageBox.information(
+                self,
+                "Boot Support Updated",
+                f"Successfully repaired/regenerated boot support and synchronized MVX_BOOT for "
+                f"{repaired_count} of {total} environment(s).",
+            )
+
     def _execute_batch_remove(self) -> None:
         ids = self._get_selected_environment_ids()
         if not ids:
@@ -567,6 +743,37 @@ class EnvironmentLibraryScreen(QWidget):
     def _on_inspect_clicked(self, env: EnvironmentRecord) -> None:
         dlg = EnvironmentDetailDialog(env, self.iso_service, self)
         dlg.exec()
+
+    def _on_repair_clicked(self, env: EnvironmentRecord) -> None:
+        progress = QProgressDialog(
+            f"Regenerating boot support for '{env.display_name}'...",
+            None,
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle("Repair / Regenerate Boot Support")
+        progress.setWindowModality(Qt.WindowModal)
+        progress.setMinimumDuration(0)
+        progress.setValue(5)
+        QApplication.processEvents()
+
+        def _cb(pct: int, msg: str) -> None:
+            progress.setValue(pct)
+            progress.setLabelText(msg)
+            QApplication.processEvents()
+
+        updated = self.iso_service.regenerate_boot_support(env.id, progress_callback=_cb)
+        progress.close()
+        if updated:
+            ov_status = self.iso_service.get_overlay_status(updated)
+            QMessageBox.information(
+                self,
+                "Boot Support Updated",
+                f"Boot support for '{updated.display_name}' has been regenerated and synchronized on MVX_BOOT.\n\n"
+                f"Overlay Status: {ov_status.status_label}\n"
+                f"{ov_status.detail_message}",
+            )
 
     def _on_rename_clicked(self, env: EnvironmentRecord) -> None:
         dlg = RenameDialog(env.display_name, self)

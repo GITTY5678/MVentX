@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from manager.services.workers import ISOCopyWorker, ChecksumWorker
+from manager.services.workers import BootSupportRepairWorker, ChecksumWorker, ISOCopyWorker
 
 
 def _fmt_bytes(num_bytes: int) -> str:
@@ -37,7 +37,7 @@ class OperationProgressDialog(QDialog):
         self,
         title: str,
         operation_description: str,
-        worker: ISOCopyWorker | ChecksumWorker,
+        worker: ISOCopyWorker | ChecksumWorker | BootSupportRepairWorker,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -77,6 +77,8 @@ class OperationProgressDialog(QDialog):
             self.worker.progress.connect(self._on_copy_progress)
         elif isinstance(self.worker, ChecksumWorker):
             self.worker.progress.connect(self._on_checksum_progress)
+        elif isinstance(self.worker, BootSupportRepairWorker):
+            self.worker.progress.connect(self._on_step_progress)
 
         self.worker.finished_success.connect(self._on_success)
         self.worker.failed.connect(self._on_failure)
@@ -91,6 +93,10 @@ class OperationProgressDialog(QDialog):
     def _on_checksum_progress(self, read_bytes: int, total: int, percent: int) -> None:
         self.progress_bar.setValue(percent)
         self.status_lbl.setText(f"Processed {_fmt_bytes(read_bytes)} of {_fmt_bytes(total)} ({percent}%)")
+
+    def _on_step_progress(self, percent: int, message: str) -> None:
+        self.progress_bar.setValue(percent)
+        self.status_lbl.setText(message)
 
     def _on_cancel_clicked(self) -> None:
         self.btn_cancel.setEnabled(False)

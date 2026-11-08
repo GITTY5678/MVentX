@@ -29,6 +29,14 @@ class InspectionResult:
     files: List[str] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
+    @property
+    def kernel_path(self) -> Optional[str]:
+        return self.discovered_kernel_path
+
+    @property
+    def initrd_path(self) -> Optional[str]:
+        return self.discovered_initrd_path
+
     def to_dict(self) -> Dict[str, Union[str, Optional[str], List[str]]]:
         return {
             "volume_id": self.volume_id,
@@ -104,8 +112,14 @@ class ISOInspector:
 
         return entries
 
-    def inspect(self) -> InspectionResult:
+    def inspect(self, maybe_path: Optional[Union[Path, str]] = None) -> InspectionResult:
         """Scan ISO volume descriptors and search for signature distribution paths."""
+        if isinstance(self, type):
+            # Called directly on the class: ISOInspector.inspect(iso_path)
+            if maybe_path is None:
+                raise ValueError("iso_path is required when calling ISOInspector.inspect as a class method")
+            return self(maybe_path).inspect()
+
         if not self.iso_path.is_file():
             return InspectionResult(
                 confidence="uncertain",
@@ -164,7 +178,7 @@ class ISOInspector:
 
                 tier2_candidates = ["/arch/boot", "/images/pxeboot", "/boot/grub", "/boot/x86_64", "/sysrescue/boot"]
                 for d in list(discovered_dirs.keys()):
-                    if d in tier2_candidates:
+                    if d in tier2_candidates or d.startswith("/casper/"):
                         lba, length = discovered_dirs[d]
                         subs = self._read_dir_records(f, lba, length)
                         for sname, sis_dir, slba, slen in subs:
@@ -200,20 +214,74 @@ class ISOInspector:
         initrd_path: Optional[str] = None
         warnings: List[str] = []
 
-        # 1. Casper (Ubuntu / Linux Mint / Pop!_OS)
-        casper_kernels = [f for f in files_list if f.startswith("/casper/vmlinuz")]
-        casper_initrds = [f for f in files_list if f.startswith("/casper/initrd")]
+        # 1. Casper (Ubuntu / Linux Mint / Pop!_OS / Zorin / Elementary)
+        casper_kernels = [
+            f for f in files_list
+            if f.startswith("/casper/") and (
+                "vmlinuz" in f.lower()
+                or f.lower().endswith(".efi")
+                or f.lower().endswith(".signed")
+                or "kernel" in f.lower()
+                or "linux" in f.lower()
+            )
+        ]
+        if not casper_kernels:
+            if "/casper" in dirs_list or any(d.startswith("/casper") for d in dirs_list):
+                casper_kernels = [f for f in files_list if "vmlinuz" in f.lower() or f.startswith("/boot/vmlinuz")]
+
+        casper_initrds = [
+            f for f in files_list
+            if f.startswith("/casper/") and (
+                "initrd" in f.lower()
+                or "initramfs" in f.lower()
+                or f.lower().endswith(".lz")
+                or f.lower().endswith(".gz")
+                or f.lower().endswith(".lz4")
+                or f.lower().endswith(".zst")
+                or f.lower().endswith(".img")
+            )
+        ]
+        if not casper_initrds:
+            if "/casper" in dirs_list or any(d.startswith("/casper") for d in dirs_list):
+                casper_initrds = [f for f in files_list if "initrd" in f.lower() or "initramfs" in f.lower()]
+
+        def _casper_k_rank(p: str) -> int:
+            low = p.lower()
+            if low == "/casper/vmlinuz":
+                return 0
+            if low == "/casper/vmlinuz.efi":
+                return 1
+            if "vmlinuz" in low:
+                return 2
+            return 3
+
+        def _casper_i_rank(p: str) -> int:
+            low = p.lower()
+            if low == "/casper/initrd":
+                return 0
+            if low == "/casper/initrd.img":
+                return 1
+            if low == "/casper/initrd.lz":
+                return 2
+            if "initrd" in low:
+                return 3
+            return 4
+
+        casper_kernels.sort(key=_casper_k_rank)
+        casper_initrds.sort(key=_casper_i_rank)
+
         if casper_kernels and casper_initrds:
             recipe = "casper"
             confidence = "high"
             kernel_path = casper_kernels[0]
             initrd_path = casper_initrds[0]
-        elif "/casper" in dirs_list:
+        elif "/casper" in dirs_list or any(d.startswith("/casper") for d in dirs_list):
             recipe = "casper"
             confidence = "medium"
             kernel_path = casper_kernels[0] if casper_kernels else "/casper/vmlinuz"
             initrd_path = casper_initrds[0] if casper_initrds else "/casper/initrd"
-            warnings.append("Casper directory detected but standard kernel/initrd filenames incomplete")
+            if not (casper_kernels and casper_initrds):
+                warnings.append("Casper directory detected; standard kernel or initrd path inferred")
 
         # 2. SystemRescue (ArchISO derivative with /sysrescue base)
         if not recipe:
@@ -348,12 +416,14 @@ class ISOInspector:
                 initrd_path = generic_initrds[0]
             else:
                 # Check volume label hints
-                combined_hints = f"{vol_id or ''} {sys_id or ''} {self.iso_path.name}".lower()
-                if "ubuntu" in combined_hints or "mint" in combined_hints or "zorin" in combined_hints or "pop" in combined_hints:
+                combined_hints = f"{vol_id or ''} {sys_id or ''} {pub_id or ''} {self.iso_path.name}".lower()
+                if any(k in combined_hints for k in ("ubuntu", "mint", "zorin", "pop", "elementary", "casper")):
                     recipe = "casper"
                     confidence = "medium"
-                    kernel_path = "/casper/vmlinuz"
-                    initrd_path = "/casper/initrd"
+                    any_v = [f for f in files_list if "vmlinuz" in f.lower()]
+                    any_i = [f for f in files_list if "initrd" in f.lower() or "initramfs" in f.lower()]
+                    kernel_path = any_v[0] if any_v else "/casper/vmlinuz"
+                    initrd_path = any_i[0] if any_i else "/casper/initrd"
                     warnings.append("Recipe inferred from volume label/name; verify kernel path before booting")
                 elif "systemrescue" in combined_hints or "sysrescue" in combined_hints:
                     recipe = "systemrescue"

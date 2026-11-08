@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 import shutil
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -202,4 +202,54 @@ class SyncBootConfigWorker(QThread):
         except Exception as exc:
             logger.exception("Boot config sync error: %s", exc)
             self.failed.emit(f"Failed to sync boot menu: {exc}")
+
+
+class BootSupportRepairWorker(QThread):
+    """Asynchronous worker for regenerating an environment's initramfs overlay and syncing GRUB boot menu."""
+
+    progress = Signal(int, str)          # (percent, step_description)
+    finished_success = Signal(object)    # EnvironmentRecord
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        registration_manager: Any,
+        env_id: str,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.registration_manager = registration_manager
+        self.env_id = env_id
+        self._is_cancelled = False
+
+    def cancel(self) -> None:
+        self._is_cancelled = True
+
+    def run(self) -> None:
+        try:
+            if not self.registration_manager:
+                self.failed.emit("Registration manager is not initialized.")
+                return
+
+            def _on_progress(pct: int, msg: str) -> None:
+                if self._is_cancelled:
+                    raise RuntimeError("Operation cancelled by user.")
+                self.progress.emit(pct, msg)
+
+            rec = self.registration_manager.regenerate_boot_support(
+                self.env_id,
+                progress_callback=_on_progress,
+            )
+            if self._is_cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished_success.emit(rec)
+        except Exception as exc:
+            if self._is_cancelled or "cancelled by user" in str(exc).lower():
+                self.cancelled.emit()
+            else:
+                logger.exception("Boot support repair error: %s", exc)
+                self.failed.emit(str(exc))
+
 

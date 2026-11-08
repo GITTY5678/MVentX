@@ -116,6 +116,10 @@
           "type": ["string", "null"],
           "description": "Optional path to the initramfs image within the ISO loopback"
         },
+        "overlay_path": {
+          "type": ["string", "null"],
+          "description": "Optional relative path to supplementary initramfs overlay archive on boot partition"
+        },
         "target_path": {
           "type": ["string", "null"],
           "description": "Target EFI or bootloader path if type is chainload"

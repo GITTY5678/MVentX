@@ -27,7 +27,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from core.boot_config.recipes import get_boot_method_descriptor
 from core.iso_manager import ISOValidationResult, ISOValidator
+from core.iso_manager.iso_inspector import InspectionResult
 from core.iso_manager.windows_iso_inspector import WindowsISOInspector, WindowsInspectionResult
 from manager.services.iso_service import ISOService
 from manager.ui.styles import (
@@ -57,6 +59,7 @@ class AddEnvironmentScreen(QWidget):
         self._selected_iso_path: Optional[Path] = None
         self._validation_result: Optional[ISOValidationResult] = None
         self._windows_inspection: Optional[WindowsInspectionResult] = None
+        self._inspection_result: Optional[InspectionResult] = None
 
         self._setup_ui()
         self.iso_service.device_service.target_changed.connect(self.refresh_unregistered_list)
@@ -145,10 +148,16 @@ class AddEnvironmentScreen(QWidget):
         form.addRow("Display Name*:", self.name_edit)
 
         self.method_combo = QComboBox()
-        self.method_combo.addItem("linux_generic_loopback", "linux_generic_loopback")
-        self.method_combo.addItem("arch_loopback", "arch_loopback")
-        self.method_combo.addItem("debian_live_loopback", "debian_live_loopback")
-        self.method_combo.addItem("windows_extracted_media", "windows_extracted_media")
+        methods = self.iso_service.get_supported_boot_methods()
+        if methods:
+            for m in methods:
+                self.method_combo.addItem(f"{m.display_name} ({m.id})", m.id)
+        else:
+            self.method_combo.addItem("Ubuntu / Linux Mint (Casper) (casper)", "casper")
+            self.method_combo.addItem("Arch Linux / Manjaro (ArchISO) (archiso)", "archiso")
+            self.method_combo.addItem("Debian Live / Clonezilla (live-boot) (live_boot)", "live_boot")
+            self.method_combo.addItem("Generic Linux Loopback (generic_kernel) (linux_generic_loopback)", "linux_generic_loopback")
+            self.method_combo.addItem("Windows Installation Media (Extracted) (windows_extracted_media)", "windows_extracted_media")
         form.addRow("Boot Method:", self.method_combo)
 
         self.desc_edit = QLineEdit()
@@ -247,6 +256,24 @@ class AddEnvironmentScreen(QWidget):
             self.iso_combo.blockSignals(False)
             self._validate_current_selection()
 
+    def _select_boot_method(self, method_id: str) -> None:
+        """Select a boot method in the combo box by method_id or recipe."""
+        if not method_id:
+            return
+        idx = self.method_combo.findData(method_id)
+        if idx >= 0:
+            self.method_combo.setCurrentIndex(idx)
+            return
+        descriptor = get_boot_method_descriptor(method_id)
+        if descriptor:
+            idx = self.method_combo.findData(descriptor.id)
+            if idx >= 0:
+                self.method_combo.setCurrentIndex(idx)
+                return
+        idx = self.method_combo.findText(method_id)
+        if idx >= 0:
+            self.method_combo.setCurrentIndex(idx)
+
     def _validate_current_selection(self) -> None:
         if not self._selected_iso_path or not self._selected_iso_path.is_file():
             self.val_status_lbl.setText("No ISO file selected.")
@@ -254,6 +281,7 @@ class AddEnvironmentScreen(QWidget):
             self.val_details_lbl.setText("")
             self.btn_register.setEnabled(False)
             self._windows_inspection = None
+            self._inspection_result = None
             return
 
         res = self.iso_service.validate_iso(self._selected_iso_path)
@@ -281,14 +309,15 @@ class AddEnvironmentScreen(QWidget):
                 self.val_details_lbl.setText(details)
 
                 # Automatically switch boot method to windows_extracted_media
-                idx = self.method_combo.findText("windows_extracted_media")
-                if idx >= 0:
-                    self.method_combo.setCurrentIndex(idx)
+                self._select_boot_method("windows_extracted_media")
 
                 # Pre-fill display name if empty
                 if not self.name_edit.text().strip():
                     self.name_edit.setText(f"Windows Setup ({win_res.architecture.value.upper()})")
             else:
+                insp_res = self.iso_service.inspect_iso(self._selected_iso_path)
+                self._inspection_result = insp_res
+
                 status_text = f"VALID: {res.filesystem_format} ({_fmt_bytes(res.file_size_bytes)})"
                 if res.has_el_torito_boot:
                     status_text += " | El Torito Boot Record Detected"
@@ -296,8 +325,23 @@ class AddEnvironmentScreen(QWidget):
                 self.val_status_lbl.setStyleSheet(f"color: {COLOR_SUCCESS}; font-weight: 600;")
 
                 details = f"Volume ID: {res.volume_identifier or 'None'} | System ID: {res.system_identifier or 'None'}\n"
+                if insp_res.detected_recipe:
+                    details += f"Detected Recipe: {insp_res.detected_recipe} (Confidence: {insp_res.confidence})\n"
+                if insp_res.kernel_path:
+                    details += f"Discovered Kernel: {insp_res.kernel_path} | Initrd: {insp_res.initrd_path or 'None'}\n"
+                if insp_res.detected_recipe == "casper":
+                    details += (
+                        "Boot Support: Casper detected — Dynamic exFAT initramfs overlay will be "
+                        "generated automatically on MVX_BOOT.\n"
+                    )
                 details += f"Notice: {res.disclaimer}"
                 self.val_details_lbl.setText(details)
+
+                # Automatically select the detected recipe in boot method dropdown
+                if insp_res.detected_recipe:
+                    self._select_boot_method(insp_res.detected_recipe)
+                else:
+                    self._select_boot_method("linux_generic_loopback")
 
                 # Pre-fill display name if empty
                 if not self.name_edit.text().strip():
@@ -313,6 +357,7 @@ class AddEnvironmentScreen(QWidget):
             self.val_details_lbl.setText("; ".join(res.errors))
             self.btn_register.setEnabled(False)
             self._windows_inspection = None
+            self._inspection_result = None
 
     def _on_register_clicked(self) -> None:
         if not self._selected_iso_path:
@@ -323,7 +368,7 @@ class AddEnvironmentScreen(QWidget):
             QMessageBox.warning(self, "Validation Error", "Please provide a custom display name.")
             return
 
-        boot_method = self.method_combo.currentText()
+        boot_method = self.method_combo.currentData() or self.method_combo.currentText()
         if boot_method == "windows_extracted_media":
             bootloader = (
                 self._windows_inspection.primary_bootloader
@@ -338,6 +383,9 @@ class AddEnvironmentScreen(QWidget):
                 enabled=self.enabled_cb.isChecked(),
             )
         else:
+            kernel_override = self._inspection_result.kernel_path if self._inspection_result else None
+            initrd_override = self._inspection_result.initrd_path if self._inspection_result else None
+            recipe = "generic_kernel" if boot_method == "linux_generic_loopback" else boot_method
             rec = self.iso_service.register_iso(
                 iso_file=self._selected_iso_path.name,
                 display_name=name,
@@ -346,13 +394,21 @@ class AddEnvironmentScreen(QWidget):
                 custom_args=self.args_edit.text().strip() or None,
                 enabled=self.enabled_cb.isChecked(),
                 calculate_hash=self.hash_cb.isChecked(),
+                recipe=recipe,
+                kernel_path=kernel_override,
+                initrd_path=initrd_override,
             )
 
         if rec:
+            overlay_note = (
+                f"\nDynamic exFAT initramfs overlay generated at {rec.overlay_path} on MVX_BOOT."
+                if rec.overlay_path
+                else ""
+            )
             QMessageBox.information(
                 self,
                 "Registration Successful",
-                f"Successfully registered '{rec.display_name}'.\n\n"
+                f"Successfully registered '{rec.display_name}'.{overlay_note}\n\n"
                 f"Boot menu configuration has been regenerated and synchronized on MVX_BOOT.",
             )
             # Reset fields and navigate to library

@@ -12,6 +12,7 @@ import shutil
 from typing import Optional
 
 from core.boot_config.generator import GrubMenuGenerator
+from core.boot_config.grub_capabilities import CapabilityReport, GRUBCapabilityRegistry
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -26,15 +27,22 @@ class BootloaderInstaller:
     def __init__(self, boot_mount_path: Path | str, assets_root: Optional[Path] = None) -> None:
         self.boot_mount = Path(boot_mount_path).resolve()
         self.assets_root = assets_root or REPO_ROOT
+        self.last_capability_report: Optional[CapabilityReport] = None
 
-    def deploy_all(self, title: str = "MVentX Multiboot System", timeout: int = 10) -> None:
-        """Execute complete bootloader deployment sequence."""
+    def deploy_all(self, title: str = "MVentX Multiboot System", timeout: int = 10) -> Optional[CapabilityReport]:
+        """Execute complete bootloader deployment sequence and validate capabilities."""
         self.deploy_directories()
         self.deploy_efi_binaries()
         self.deploy_grub_configuration()
         self.deploy_modules()
         self.deploy_fonts()
         self.deploy_initial_menu(title=title, timeout=timeout)
+
+        # Validate runtime capability against official GNU GRUB manifests
+        registry = GRUBCapabilityRegistry(x86_64_efi_dir=self.boot_mount / "boot" / "grub" / "x86_64-efi")
+        report = registry.validate_staged_assets(self.boot_mount)
+        self.last_capability_report = report
+        return report
 
     def deploy_directories(self) -> None:
         """Create standard EFI and GRUB directory layout."""
@@ -69,7 +77,7 @@ class BootloaderInstaller:
         return target
 
     def deploy_modules(self) -> int:
-        """Copy runtime GRUB dynamic modules (.mod) to /boot/grub/x86_64-efi/."""
+        """Copy runtime GRUB dynamic modules (.mod) and manifests (.lst) to /boot/grub/x86_64-efi/."""
         candidates = [
             self.assets_root / "boot" / "grub" / "x86_64-efi",
             self.assets_root / "build" / "grub-windows" / "grub-2.12-for-windows" / "x86_64-efi",
@@ -79,10 +87,13 @@ class BootloaderInstaller:
             raise BootloaderInstallError("GRUB runtime modules directory (x86_64-efi) not found.")
 
         target_dir = self.boot_mount / "boot" / "grub" / "x86_64-efi"
+        target_dir.mkdir(parents=True, exist_ok=True)
         count = 0
-        for mod_file in source_mod_dir.glob("*.mod"):
-            shutil.copy2(mod_file, target_dir / mod_file.name)
-            count += 1
+        for item in source_mod_dir.iterdir():
+            if item.is_file() and (item.suffix == ".mod" or item.suffix == ".lst"):
+                shutil.copy2(item, target_dir / item.name)
+                if item.suffix == ".mod":
+                    count += 1
 
         if count == 0:
             raise BootloaderInstallError(f"No .mod files found in {source_mod_dir}")
